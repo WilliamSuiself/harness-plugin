@@ -1,0 +1,15 @@
+{
+  "name": "@memorypets/host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./lib/index.mjs",
+  "exports": {
+    ".": "./lib/index.mjs",
+    "./tools": "./lib/tools.mjs"
+  },
+  "files": ["lib"],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "workspace:*"
+  }
+}

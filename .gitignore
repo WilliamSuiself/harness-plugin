@@ -1,0 +1,26 @@
+node_modules
+dist
+*.log
+.DS_Store
+
+# === DSH runtime / user data (NEVER commit) ===
+.dsh-home/
+.dsh-home_backup*/
+
+# === Temporary probe / test scripts (created during debugging) ===
+_*.py
+_*.mjs
+_*.log
+_*.sh
+e2e_test*.py
+_direct_apply_test.py
+
+# === Env / secrets ===
+.env
+.env.local
+.credentials.yaml
+
+# === Editor / OS ===
+.idea/
+.vscode/
+Thumbs.db

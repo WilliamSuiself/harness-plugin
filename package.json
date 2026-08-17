@@ -1,0 +1,19 @@
+{
+  "name": "@memorypets/harness-plugin-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MemoryPets — a floating companion plugin for DeepSeek Harness that remembers the user's working memory and credentials.",
+  "scripts": {
+    "build": "pnpm -r run build",
+    "typecheck": "pnpm -r run typecheck",
+    "lint": "pnpm -r run lint"
+  },
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": ">=22.19"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}

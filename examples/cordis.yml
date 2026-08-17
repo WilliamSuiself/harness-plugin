@@ -1,0 +1,42 @@
+# MemoryPets 示例装载 —— 在 dsh web 启动时附加到任意 profile。
+# 用法：
+#   pnpm dsh web --patch ./examples/cordis.yml
+#
+# 假设 memorypets 的源码位于 ../packages/memorypets ，
+# 通过 pnpm workspace 协议可写成 '@memorypets/host' 与 '@memorypets/client'。
+# 实际发布前请改为 npm 命名 '@memorypets/host' '@memorypets/client'。
+
+- name: memorypets-host
+  builtin: false
+  package: '@memorypets/host'
+  apply: '@memorypets/host'
+  config:
+    # 加载已加密的 envelope；首次启动返回 null。
+    loadEnvelope: |
+      !!js |
+      async () => {
+        const raw = localStorage.getItem('memorypets.envelope.v1');
+        return raw ? JSON.parse(raw) : null;
+      }
+    # 持久化：把最新 envelope 写回 localStorage。
+    saveEnvelope: |
+      !!js |
+      async (env) => {
+        if (env === null) {
+          localStorage.removeItem('memorypets.envelope.v1');
+        } else {
+          localStorage.setItem('memorypets.envelope.v1', JSON.stringify(env));
+        }
+      }
+
+- name: memorypets-tools
+  builtin: false
+  package: '@memorypets/host'
+  apply: '@memorypets/host/tools'
+  # 在 host 之后挂载，确保 ctx.memoryPets 已注入。
+
+- name: memorypets-client
+  builtin: false
+  package: '@memorypets/client'
+  apply: '@memorypets/client'
+  inject: ['memoryPets', 'systemPrompt']
