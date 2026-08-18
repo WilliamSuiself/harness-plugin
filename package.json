@@ -5,15 +5,16 @@
   "type": "module",
   "description": "MemoryPets — a floating companion plugin for DeepSeek Harness that remembers the user's working memory and credentials.",
   "scripts": {
-    "build": "pnpm -r run build",
-    "typecheck": "pnpm -r run typecheck",
-    "lint": "pnpm -r run lint"
+    "build": "pnpm run build:client",
+    "build:client": "node scripts/build-client.mjs",
+    "test": "node --test 'packages/host/test/*.test.mjs'",
+    "reset-vault": "node scripts/reset-vault.mjs",
+    "restart-dsh": "bash scripts/restart-dsh.sh",
+    "lint": "echo 'no lint configured yet'"
   },
   "packageManager": "pnpm@11.7.0",
   "engines": {
     "node": ">=22.19"
   },
-  "devDependencies": {
-    "typescript": "^5.6.3"
-  }
+  "devDependencies": {}
 }

@@ -353,7 +353,12 @@ export function apply(ctx) {
         '(e.g. make an HTTP call with an API key, paste a password into a script). NEVER ' +
         'guess secrets from <HIDDEN> placeholders; NEVER auto-inject them — only call this ' +
         'tool right before consumption, then discard the returned value after the step. ' +
-        'Pass label (exact or fuzzy) to locate a credential entry. Works only while vault is unlocked.',
+        'Match precedence: (1) exact id, (2) label exact case-insensitive, (3) fuzzy ' +
+        'substring match — but ONLY when the user-supplied label has at least 4 characters. ' +
+        'If multiple credentials have labels containing the given substring, the tool ' +
+        'returns an AMBIGUITY error and NEVER decrypts anything; in that case call ' +
+        'memorypets_list_entries(kind=credential) and pick the exact label, then retry. ' +
+        'Works only while vault is unlocked.',
       readOnly: true,
       parameters: {
         properties: {
@@ -361,7 +366,9 @@ export function apply(ctx) {
             type: 'string',
             description:
               'Label of the credential to decrypt. Exact case-insensitive match is tried first; ' +
-              'then a case-insensitive substring match as a fallback.',
+              'fuzzy substring match is tried as a fallback, but only when `label.trim().length >= 4`. ' +
+              'Shorter queries (e.g. "key", "api") deliberately fail closed to avoid leaks between ' +
+              'similarly-named credentials.',
           },
         },
         required: ['label'],
@@ -370,6 +377,20 @@ export function apply(ctx) {
         const result = await opReveal(service, { label });
         if (result.locked) {
           return needUnlockReply('Credential decryption requires an unlocked vault.');
+        }
+        if (result.ambiguous) {
+          const names = (result.candidates || []).map((c) => c.label).filter(Boolean);
+          return {
+            ok: false,
+            ambiguous: true,
+            candidates: result.candidates,
+            reason:
+              'Multiple credentials match label="' +
+              label +
+              '": ' +
+              (names.join(' / ') || '(unknown labels)') +
+              '. Call memorypets_list_entries(kind=credential) and pick the exact label, then retry.',
+          };
         }
         if (result.ok) return result;
         if (result.found === false) {

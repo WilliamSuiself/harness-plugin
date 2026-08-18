@@ -134,34 +134,61 @@ export async function opRemove(service, { id, label, confirmKind } = {}) {
 }
 
 /**
- * Decrypts and returns a credential value. Tries exact label match, then
- * fuzzy substring match, then falls back to service.revealCredential (which
- * reads straight from the raw vault instead of the client-safe projection).
+ * Decrypts and returns a credential value. Delegates entirely to
+ * `service.revealCredential`, which is the ONLY authoritative decrypt path
+ * and reads the raw vault (matching semantics: id → exact label → fuzzy
+ * (≥4 chars) → ambiguity-error).
+ *
+ * SECURITY:
+ *   - We do NOT inspect `safeList` here. The client-safe projection always
+ *     projects credential values to the literal sentinel `'<HIDDEN>'`, so
+ *     any "exact match" against it would be useless anyway. Reading the raw
+ *     vault directly from the service is what guarantees the decrypted
+ *     secret never leaks via a safe-list side channel.
+ *   - The service enforces an `ambiguous` signal when a fuzzy match produces
+ *     multiple candidates. We propagate that as `{ ok: false, ambiguous: true }`
+ *     so callers (HTTP / direct-apply / LLM tool) can prompt the user for a
+ *     more specific label.
+ *
+ * Result shape:
+ *   - { ok: true, found: true, value, label?, match?, matchedLabel? } on success
+ *   - { ok: true, found: false }                                            on no match
+ *   - { ok: false, ambiguous: true, candidates, error }                    on multi-match
+ *   - { ok: false, locked: true }                                          on locked vault
+ *   - { ok: false, error }                                                 on missing/empty label
  */
 export async function opReveal(service, { label } = {}) {
   if (typeof label !== 'string' || !label.trim()) {
     return { ok: false, error: 'label (non-empty string) is required' };
   }
   if (!service.isUnlocked?.()) return { ok: false, locked: true };
-  const list = await safeList(service);
-  const key = String(label).trim().toLowerCase();
-  const exact = list.find(
-    (e) => e.kind === 'credential' && String(e.label ?? '').trim().toLowerCase() === key,
-  );
-  if (exact && typeof exact.value === 'string') {
-    return { ok: true, found: true, label: exact.label, value: exact.value };
+  if (typeof service.revealCredential !== 'function') {
+    // Defensive: should never happen for a real MemoryPets service. Returning
+    // a structured "not found" here keeps downstream callers from breaking.
+    return { ok: true, found: false, error: 'revealCredential unavailable on this service' };
   }
-  const fuzzy = list.find(
-    (e) => e.kind === 'credential' && String(e.label ?? '').toLowerCase().includes(key),
-  );
-  if (fuzzy && typeof fuzzy.value === 'string') {
-    return { ok: true, found: true, label: fuzzy.label, value: fuzzy.value, match: 'fuzzy' };
+  const raw = await service.revealCredential(label);
+  if (raw === undefined) {
+    return { ok: true, found: false };
   }
-  if (typeof service.revealCredential === 'function') {
-    const raw = await service.revealCredential(label);
-    if (typeof raw === 'string' && raw.length > 0) {
-      return { ok: true, found: true, label, value: raw, match: 'service-bridge' };
-    }
+  if (raw && raw.ambiguous) {
+    return {
+      ok: false,
+      ambiguous: true,
+      candidates: raw.candidates,
+      error: 'Multiple credentials match the label; please specify exactly.',
+    };
   }
-  return { ok: false, found: false };
+  if (raw && typeof raw.value === 'string') {
+    return {
+      ok: true,
+      found: true,
+      // Prefer the matchedLabel when the service resolved via fuzzy match —
+      // it tells the LLM/user which credential was actually decrypted.
+      label: raw.matchedLabel ?? label,
+      value: raw.value,
+      ...(raw.match ? { match: raw.match } : {}),
+    };
+  }
+  return { ok: true, found: false };
 }

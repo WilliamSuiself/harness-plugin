@@ -4,11 +4,11 @@ MemoryPets 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harnes
 
 核心能力：
 
-- 浮动宠物 UI：720×720 PNG 帧动画，支持 `standing / thinking / waitting / sleeping` 四种心情。
+- 浮动宠物 UI：720×720 PNG 帧动画，支持 `standing / thinking / waiting / sleeping` 四种心情。
 - 加密保险库：AES-GCM-256，PBKDF2-SHA-256 25 万次迭代派生。
 - 自定义暗语：首次设置或运行时随时修改，LLM 与 direct-apply 都会识别。
 - 暗语直达模式：消息中出现任意已配置暗语时，绕过 LLM 决策，由本地规则解析意图并立即执行。
-- 五条 LLM 工具：查状态、列条目、增改、删除、揭示凭证。
+- 六条 LLM 工具：握手、查状态、列条目、增改、删除、揭示凭证。
 
 ## 目录结构
 
@@ -16,25 +16,27 @@ MemoryPets 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harnes
 harness-plugin/
 ├── packages/
 │   ├── host/
-│   │   └── lib/
-│   │       ├── index.mjs        # Cordis 插件：ctx.memoryPets、HTTP 路由、direct-apply
-│   │       ├── tools.mjs        # LLM 工具注册
-│   │       ├── operations.mjs   # 公共保险库操作（单点事实源）
-│   │       ├── intent.mjs       # 暗语检测 + 意图解析
-│   │       ├── override-prompt.mjs # 高优先级 systemPrompt 覆盖文本
-│   │       ├── crypto.mjs       # Web Crypto 原语
-│   │       └── vault.mjs        # 加锁 / 解锁 / 快照
+│   │   ├── lib/                 # 编译后的 ESM 产物
+│   │   │   ├── index.mjs        # Cordis 插件：ctx.memoryPets、HTTP 路由、direct-apply
+│   │   │   ├── tools.mjs        # LLM 工具注册
+│   │   │   ├── operations.mjs   # 公共保险库操作（单点事实源）
+│   │   │   ├── intent.mjs       # 暗语检测 + 意图解析（中文关键词常量表）
+│   │   │   ├── override-prompt.mjs # 高优先级 systemPrompt 覆盖文本
+│   │   │   ├── crypto.mjs       # Web Crypto 原语
+│   │   │   └── vault.mjs        # 加锁 / 解锁 / 快照
+│   │   └── test/                # node:test 单元测试
 │   └── client/
 │       └── lib/
 │           ├── index.mjs        # host 侧桩（用于 dsh-client-modules 扫描）
 │           ├── client.mjs       # 浏览器源码（React.createElement，无 JSX）
-│           └── client.bundle.js # 浏览器打包产物
+│           └── client.bundle.js # ⚠️ 自动生成，不要手改（跑 pnpm build:client 重生）
 ├── assets/                      # 宠物 PNG 帧序列
-└── examples/
-    └── cordis.yml               # 简化示例（仅供参考，本指南使用文件系统持久化）
+├── scripts/
+│   ├── build-client.mjs         # client.mjs → client.bundle.js 打包脚本
+│   └── reset-vault.mjs          # 本地重置 envelope + codewords
+├── CHANGELOG.md
+└── README.md
 ```
-
-> **Note:** 本仓库目前直接提供 `packages/*/lib/` 下编译好的 `.mjs` 产物，没有独立的 TypeScript `src/` 构建步骤。根目录 `package.json` 的 `build`/`typecheck`/`lint` 目前仍依赖各子包自己补齐 `scripts` 与 TS 源码。
 
 ## 前置要求
 
@@ -46,8 +48,22 @@ harness-plugin/
 ## 安装步骤
 
 1. 克隆本仓库到本地。
-2. 把下文 `cordis.patch.yml` 中的 `/path/to/harness-plugin` 替换为你的实际路径。
-3. 将以下配置写入 dsh 的 `web` profile patch（通常为 `~/.dsh/profiles/web/cordis.patch.yml`）：
+2. （可选）`pnpm install` 安装 dev 依赖（目前仓库零运行时依赖，可跳过）。
+3. 把下文 `cordis.patch.yml` 中的 `/path/to/harness-plugin` 替换为你的实际路径。
+4. 将以下配置写入 dsh 的 `web` profile patch（通常为 `~/.dsh/profiles/web/cordis.patch.yml`）。同时把端口固定到 3080（避免占用 dsh 默认端口）：
+
+```yaml
+# MemoryPets plugin patch layer for the web profile + port override.
+#
+# 把 /path/to/harness-plugin 替换为你的实际路径。
+# webserver 节把端口固定到 3080；想换其它端口改 port 即可。
+
+- name: webserver
+  config:
+    host: 127.0.0.1
+    port: 3080
+
+- insert:
 
 ```yaml
 # MemoryPets plugin patch layer for the web profile.
@@ -107,6 +123,9 @@ harness-plugin/
       name: /path/to/harness-plugin/packages/client/lib/index.mjs
 ```
 
+> 上述 `loadEnvelope` / `saveEnvelope` / `loadCodeWords` / `saveCodeWords` 块复刻了 `packages/host/lib/paths.mjs` 中 `envelopePath()` / `codewordsPath()` 的解析规则（`process.env.DSH_HOME ?? path.join(cwd, '.dsh-home')`）。若想替换为 `dsh-settings-file` / SQLite / 远程 KV 等更安全持久化后端，覆盖这四个回调即可，无需修改 host 代码。
+```
+
 4. 进入 deepseek-harness 目录，确保 Node / pnpm 版本正确：
 
 ```bash
@@ -114,13 +133,26 @@ volta install node@22.19.0 pnpm@11.7.0
 pnpm install --frozen-lockfile
 ```
 
+> 启动顺序：先 deepseek-harness 安装依赖，再回到本仓库（如果想跑测试/单测）执行 `pnpm test`。
+
 5. 启动 dsh web：
 
 ```bash
 node apps/cli/lib/bin.js web
 ```
 
-终端会输出访问地址（通常是 `http://localhost:8787`）。打开浏览器访问，右下角即会出现 MemoryPets 宠物。
+终端会输出访问地址（通常是 `http://localhost:3080`，如果你的 `webServer` config 指定了别的端口则跟着变）。打开浏览器访问，右下角即会出现 MemoryPets 宠物。
+
+> 端口由 `webServer` 服务的 `config.port` 决定，默认值在 `apps/cli/config/...` 或 `apps/web/...` profile bundle 里。要改端口（比如改成3080 避开冲突），在 `~/.dsh/profiles/web/cordis.patch.yml` 里插入或覆盖：
+>
+> ```yaml
+> - name: webserver
+>   config:
+>     host: 127.0.0.1
+>     port: 3080
+> ```
+>
+> 写在 patch 文件里是持久化的；命令行 `--port` 不是所有版本都支持。
 
 ## 首次使用
 
@@ -179,15 +211,51 @@ node apps/cli/lib/bin.js web
 
 ## 开发与调试
 
+### 重启 dsh web 让改动生效
+
+改完任何 `packages/host/lib/*.mjs` 或 `packages/client/lib/*` 后，最稳的生效方式是**重启 dsh web + 浏览器硬刷新**：
+
+```bash
+pnpm restart-dsh            # 杀旧进程 + 在 foreground 启动 dsh web（默认 3080 端口）
+# 等终端打出 http://localhost:3080，浏览器打开，硬刷新（Cmd/Ctrl + Shift + R）
+```
+
+`scripts/restart-dsh.sh` 通过环境变量支持自定义路径和"要清掉的端口"：
+
+```bash
+DSH_REPO=/path/to/deepseek-harness ./scripts/restart-dsh.sh
+DSH_PORT=9000 ./scripts/restart-dsh.sh   # 杀进程时盯 9000（覆盖默认 3080）
+DSH_PORT=0    ./scripts/restart-dsh.sh   # 跳过端口清理步骤
+```
+
+启动命令实际是 `node apps/cli/lib/bin.js web`（不带 `--port`）；真正监听的端口由 `~/.dsh/profiles/web/cordis.patch.yml` 里 `webServer.config.port` 决定（参见上文安装步骤）。
+
+如果你想直接启动而不走 patch，CLI 可能支持 `--port` 但不是所有 dsh 版本都识别——推荐改 patch 文件。
+
 ### 重新打包客户端
 
-仓库中的 `packages/client/lib/client.bundle.js` 是打包后的产物，通常不需要重新生成。如果你修改了 `packages/client/lib/client.mjs`，需要先打包。打包逻辑是：
+仓库中的 `packages/client/lib/client.bundle.js` 是打包后的产物，由 `scripts/build-client.mjs` 从 `packages/client/lib/client.mjs` 自动生成。
 
-1. 移除源码顶部的 `import * as React from 'react';`（dsh 浏览器端会注入 React）。
-2. 把所有 `export const / export function / export default` 改成 CommonJS 风格变量。
-3. 用 `window.__ModuleLoader__.load({ id: '@memorypets/client', factory: ... })` 包裹。
+- 改了 `client.mjs` 后跑 `pnpm build:client`（或 `node scripts/build-client.mjs`）。
+- 脚本会做语法检查（`node --check`）并输出导出的名字清单。
+- 在 CI 中可以用 `node scripts/build-client.mjs --check`，当 bundle 过期时以非零状态退出。
+- **不要**直接手改 `client.bundle.js` —— 它会被下次 build 覆盖。
 
-一个可直接保存并运行的参考脚本见 `scripts/build-client.mjs`（若仓库中不存在，可参考 `/tmp/build_bundle.mjs` 自行创建）。
+### 单元测试
+
+```bash
+pnpm test
+```
+
+跑 `packages/host/test/` 下的 `node --test` 单测。覆盖 `crypto`、`vault`、`operations`、`intent`、`codeword-detector`。零依赖，CI 直接可用。
+
+### 重置保险库
+
+```bash
+pnpm reset-vault
+```
+
+删除 `<DSH_HOME>/memorypets.envelope.json` 和 `<DSH_HOME>/memorypets.codewords.json`，让下次 `dsh web` 启动时进入首次 setup 流程。不会触碰 dsh 自己的会话/profile/setting 文件。
 
 ### 动画不刷新
 
@@ -218,7 +286,7 @@ node apps/cli/lib/bin.js web
 ### 暗语不生效
 
 - 确认浮动面板里已保存暗语。
-- 暗语检测不区分大小写，按词边界匹配。
+- 暗语检测不区分大小写，按**子串**匹配（包含位置任意）。
 - 查看 `~/.dsh/memorypets.codewords.json` 是否存在且 `words` 字段为数组。
 
 ## 版本与许可

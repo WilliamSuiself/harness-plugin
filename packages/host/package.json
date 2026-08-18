@@ -9,7 +9,6 @@
     "./tools": "./lib/tools.mjs"
   },
   "files": ["lib"],
-  "peerDependencies": {
-    "@deepseek-ai/cordis": "workspace:*"
-  }
+  "peerDependencies": {},
+  "peerDependenciesMeta": {}
 }

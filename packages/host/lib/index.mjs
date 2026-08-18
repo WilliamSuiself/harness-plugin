@@ -3,18 +3,18 @@
 // This module is a plain ESM `.mjs` file because the Cordis loader runs under
 // Node >= 22 and imports via dynamic `import(specifier)` — the unwrapper grabs
 // either the default export or named exports matching a plugin shape.
-import { readFileSync, readFile, existsSync, lstatSync, realpathSync } from 'node:fs';
-import { createHash } from 'node:crypto';
-import { join, dirname, basename, sep } from 'node:path';
+import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Vault } from './vault.mjs';
 import { opStatus, opList, opUpsert, opRemove, opReveal, safeList } from './operations.mjs';
 import { makeCodeWordDetector, parseIntent } from './intent.mjs';
 import { buildOverridePrompt } from './override-prompt.mjs';
+import { codewordsPath } from './paths.mjs';
+import { registerAssetsRoute, resolveAssetsRoot } from './routes/assets-route.mjs';
+import { registerClientBundle } from './client-modules-registration.mjs';
 
 // packages/host/lib/index.mjs → packages/host/lib → packages/host → packages → <repo root>
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-const CLIENT_PKG_PATH = join(REPO_ROOT, 'packages', 'client', 'package.json');
 const CLIENT_BUNDLE_PATH = join(REPO_ROOT, 'packages', 'client', 'lib', 'client.bundle.js');
 const CLIENT_INDEX_PATH = join(REPO_ROOT, 'packages', 'client', 'lib', 'index.mjs');
 
@@ -43,11 +43,8 @@ export async function apply(ctx, config = {}) {
         customCodeWords = config.loadCodeWords.filter((w) => typeof w === 'string' && w.trim());
       } else {
         const fs = await import('node:fs/promises');
-        const path = await import('node:path');
-        const dshHome = process.env.DSH_HOME || path.default.join(process.cwd(), '.dsh-home');
-        const file = path.default.join(dshHome, 'memorypets.codewords.json');
         try {
-          const raw = await fs.readFile(file, 'utf8');
+          const raw = await fs.readFile(codewordsPath(), 'utf8');
           const data = JSON.parse(raw);
           if (Array.isArray(data.words)) {
             customCodeWords = data.words.filter((w) => typeof w === 'string' && w.trim());
@@ -66,10 +63,7 @@ export async function apply(ctx, config = {}) {
         // no-op: static array; config layer must reference the same object
       } else {
         const fs = await import('node:fs/promises');
-        const path = await import('node:path');
-        const dshHome = process.env.DSH_HOME || path.default.join(process.cwd(), '.dsh-home');
-        const file = path.default.join(dshHome, 'memorypets.codewords.json');
-        await fs.writeFile(file, JSON.stringify({ words: customCodeWords }, null, 2));
+        await fs.writeFile(codewordsPath(), JSON.stringify({ words: customCodeWords }, null, 2));
       }
     } catch {}
   };
@@ -174,33 +168,69 @@ export async function apply(ctx, config = {}) {
       refreshSystemPrompt();
     },
     async revealCredential(idOrLabel) {
+      // Returns either:
+      //   { value: '<raw decrypted secret>' }                    — exact id/label hit
+      //   { value: '<raw decrypted secret>', match: 'fuzzy' }    — fuzzy label hit (≥4 chars)
+      //   { ambiguous: true, candidates: [{ id, label }] }       — fuzzy hit matched multiple credentials
+      //   undefined                                              — no match (locked or empty / too-short key)
+      //
+      // SECURITY CONTRACT:
+      //   - Reads raw vault (containing profile/work plaintext). Only the `credential`
+      //     kind entries are ever surfaced, and even those values are returned as a
+      //     single string field — never spread into a list.
+      //   - Fuzzy match requires `idOrLabel.length >= 4` after trim+lowercase to
+      //     avoid trivial collisions between short suffixes ("key", "api", "ssh").
+      //   - If fuzzy match produces MULTIPLE candidates, the call returns
+      //     `{ ambiguous: true, candidates }` instead of any value, so the caller
+      //     can ask the user to narrow the label.
       if (!vault.isUnlocked()) return undefined;
-      // 支持 id 精确匹配 + label 大小写不敏感模糊匹配
       const list = vault.list();
-      let byId = list.find((e) => e.kind === 'credential' && e.id === idOrLabel);
-      if (byId) return byId.value;
-      const key = String(idOrLabel || '').toLowerCase().trim();
+      // Step 1: id exact match
+      const byId = list.find((e) => e.kind === 'credential' && e.id === idOrLabel);
+      if (byId) return { value: byId.value };
+      // Step 2: label exact (case-insensitive) match
+      const keyRaw = String(idOrLabel || '').trim();
+      const key = keyRaw.toLowerCase();
       if (!key) return undefined;
-      const byLabel = list.find((e) =>
-        e.kind === 'credential' && String(e.label || '').toLowerCase().trim() === key,
+      const byLabel = list.find(
+        (e) => e.kind === 'credential' && String(e.label || '').toLowerCase().trim() === key,
       );
-      if (byLabel) return byLabel.value;
-      const fuzzy = list.find((e) =>
-        e.kind === 'credential' && String(e.label || '').toLowerCase().includes(key),
+      if (byLabel) return { value: byLabel.value };
+      // Step 3: fuzzy substring match — only when key is long enough to be specific
+      const MIN_FUZZY_LEN = 4;
+      if (key.length < MIN_FUZZY_LEN) return undefined;
+      const fuzzyHits = list.filter(
+        (e) => e.kind === 'credential' && String(e.label || '').toLowerCase().includes(key),
       );
-      return fuzzy ? fuzzy.value : undefined;
+      if (fuzzyHits.length === 1) {
+        return { value: fuzzyHits[0].value, match: 'fuzzy', matchedLabel: fuzzyHits[0].label };
+      }
+      if (fuzzyHits.length > 1) {
+        return {
+          ambiguous: true,
+          candidates: fuzzyHits.map((e) => ({ id: e.id, label: e.label })),
+        };
+      }
+      return undefined;
     },
     lock() {
       vault.lock();
       master = null;
       refreshSystemPrompt();
     },
-    // Host → Client bridge (list entries without credential values)
+    // Host → Client bridge (list entries without credential plaintext).
+    // SECURITY: credential entries always have `value` projected to the literal
+    // sentinel '<HIDDEN>' — never the raw secret. Callers that need the actual
+    // secret MUST go through revealCredential(id|label), which enforces exact /
+    // fuzzy (≥4 chars) / ambiguity handling. Keeping the field present (rather
+    // than `undefined`) makes downstream renderers safe and predictable: any
+    // code that pattern-matches `typeof value === 'string'` on the projection
+    // never accidentally treats a credential as "missing".
     async listEntries() {
       return vault.isUnlocked()
         ? vault.list().map((e) =>
             e.kind === 'credential'
-              ? { ...e, value: undefined, hint: e.hint ?? '•'.repeat(8) }
+              ? { ...e, value: '<HIDDEN>', hint: e.hint ?? '•'.repeat(8) }
               : e,
           )
         : [];
@@ -237,6 +267,14 @@ export async function apply(ctx, config = {}) {
       // enough for direct-apply; the prompt text will catch up on next boot.
       try { refreshOverridePrompt?.(); } catch {}
       return out;
+    },
+    async changeMaster(current, next) {
+      if (!vault.isUnlocked()) throw new Error('Vault is locked');
+      if (master === null) throw new Error('No active session');
+      if (master !== current) throw new Error('Current password is wrong');
+      if (typeof next !== 'string' || next.length < 6) throw new Error('New password must be at least 6 characters');
+      master = next;
+      await persist();
     },
   };
 
@@ -291,68 +329,14 @@ export async function apply(ctx, config = {}) {
   // 解决：拿到 ctx.clientModules 后，直接写入它的内部 table/pkgMeta，
   // 然后触发 graph 重算。tapIndex 回调是闭包读 this.composed，
   // 所以后续任何 HTML 请求都会拿到包含我们 entry 的新 graph。
-  try {
-    if (ctx.clientModules) {
-      const registry = ctx.clientModules;
-      const clientId = '@memorypets/client';
-      const clientPkgPath = CLIENT_PKG_PATH;
-      const clientBundlePath = CLIENT_BUNDLE_PATH;
-      const injectEdges = [
-        '@deepseek-ai/dsh-client-ui-slots',
-      ];
-      // 1) 写 pkgMeta 缓存，防止 flush 时 processOne 尝试 resolve 绝对路径时报错
-      registry.pkgMeta.set(clientId, {
-        clientPath: clientBundlePath,
-        inject: injectEdges,
-        immediately: true,
-      });
-      // 2) 计算 bundle rev hash
-      let rev;
-      try {
-        rev = createHash('sha1')
-          .update(readFileSync(clientBundlePath))
-          .digest('hex')
-          .slice(0, 12);
-      } catch {
-        rev = 'dev-' + Math.random().toString(36).slice(2, 14);
-      }
-      // 3) 写 table 记录
-      registry.table.set(clientId, {
-        entry: {
-          id: clientId,
-          url: `/plugins/${encodeURIComponent(clientId)}/client.js?rev=${rev}`,
-          rev,
-          inject: injectEdges,
-          immediately: true,
-        },
-        clientPath: clientBundlePath,
-      });
-      // 4) 为绝对路径的 entry name（memorypets-client 的 entry.name）也做同样的缓存，
-      //    防止后续 flush 时 processOne 再查这个名字时发现不了，删了我们的记录。
-      const absName = CLIENT_INDEX_PATH;
-      registry.pkgMeta.set(absName, {
-        clientPath: clientBundlePath,
-        inject: injectEdges,
-        immediately: true,
-      });
-      // 5) 重算 composed graph
-      registry.composed = registry.compose();
-      // 6) 通知订阅者（SSE / HMR 等）graph 变化
-      try {
-        registry.notifyGraphChanged();
-      } catch {
-        // 非关键，忽略
-      }
-      // 7) 把 absName 从 dirty 里移除，避免后续 flush 误处理
-      try {
-        registry.dirty.delete(absName);
-      } catch {
-        // ignore
-      }
-    }
-  } catch (err) {
-    // 注册 client 失败不影响整体——至少 vault 和 tools 还能工作
-    try { ctx.logger?.warn?.(err); } catch { /* noop */ }
+  if (ctx.clientModules) {
+    registerClientBundle(ctx.clientModules, {
+      clientId: '@memorypets/client',
+      clientBundlePath: CLIENT_BUNDLE_PATH,
+      clientIndexPath: CLIENT_INDEX_PATH,
+      injectEdges: ['@deepseek-ai/dsh-client-ui-slots'],
+      logger: ctx.logger,
+    });
   }
 
   // ——— 静态动画 PNG 资源路由：/memorypets-assets/* → 读 <workspace>/assets/
@@ -362,85 +346,8 @@ export async function apply(ctx, config = {}) {
     let wsvc = null;
     try { wsvc = ctx.webServer; } catch {} // Cordis strict mode: inject 才允许读
     if (wsvc && typeof wsvc.register === 'function') {
-      const assetsRoot = resolveAssetsRoot();
-      const ASSETS_PREFIX = '/memorypets-assets'; // 无末尾 /，让 match 更稳定
-      const serve = (req, res) => {
-        try {
-          const rawPath = new URL(req.url || '/', 'http://x').pathname;
-          if (!rawPath.startsWith(ASSETS_PREFIX)) {
-            res.writeHead(404); res.end(); return;
-          }
-          const rest = rawPath.slice(ASSETS_PREFIX.length).replace(/^\/+/, '');
-          const rel = rest.split('/').filter(Boolean);
-          if (!rel.length) {
-            res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-            res.end(JSON.stringify({ error: 'invalid path' })); return;
-          }
-          // Double defense: check decoded segment for dot-traversal, cover %2e%2e attacks.
-          for (const seg of rel) {
-            if (seg === '..' || seg === '.') {
-              res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-              res.end(JSON.stringify({ error: 'invalid path' })); return;
-            }
-            let decoded = seg;
-            try { decoded = decodeURIComponent(seg); } catch {}
-            if (decoded === '..' || decoded === '.' || decoded.includes('\0')) {
-              res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-              res.end(JSON.stringify({ error: 'invalid path' })); return;
-            }
-          }
-          const kind = rel[0];
-          if (kind !== 'standing' && kind !== 'thinking' && kind !== 'waitting'
-            && kind !== 'sleeping' && !(rel.length === 1 && kind === 'icon.png')) {
-            res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-            res.end(JSON.stringify({ error: 'not found' })); return;
-          }
-          const fsPath = join(assetsRoot, ...rel);
-          // Double defense: final resolved path must stay inside assetsRoot
-          try {
-            const st = lstatSync(fsPath);
-            if (st.isSymbolicLink()) {
-              res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
-              res.end(JSON.stringify({ error: 'symlinks forbidden' })); return;
-            }
-            const resolved = realpathSync(fsPath);
-            const rootResolved = realpathSync(assetsRoot) + sep;
-            if (!(resolved === rootResolved.slice(0, -1) || resolved.startsWith(rootResolved))) {
-              res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
-              res.end(JSON.stringify({ error: 'path escape' })); return;
-            }
-            if (!st.isFile()) {
-              res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-              res.end(JSON.stringify({ error: 'not found' })); return;
-            }
-          } catch (fsErr) {
-            res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-            res.end(JSON.stringify({ error: 'not found' })); return;
-          }
-          readFile(fsPath, (err, buf) => {
-            if (err) {
-              res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-              res.end(JSON.stringify({ error: 'not found' })); return;
-            }
-            const isPng = /\.png$/i.test(rel[rel.length - 1]);
-            res.writeHead(200, {
-              'Content-Type': isPng ? 'image/png' : 'application/octet-stream',
-              'Content-Length': buf.length,
-              'Cache-Control': 'public, max-age=3600',
-            });
-            res.end(buf);
-          });
-        } catch (e) {
-          res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: e?.message || String(e) }));
-        }
-      };
-      try {
-        wsvc.register({ kind: 'prefix', path: ASSETS_PREFIX, handler: serve });
-        try { ctx.logger?.info?.('[memorypets] route registered: ' + ASSETS_PREFIX + ' root=' + assetsRoot); } catch {}
-      } catch (e) {
-        try { ctx.logger?.warn?.('[memorypets] route register failed: ' + (e?.message ?? e)); } catch {}
-      }
+      const assetsRoot = resolveAssetsRoot(REPO_ROOT);
+      registerAssetsRoute(wsvc, assetsRoot, ctx.logger);
     }
   } catch (e) {
     // 路由注册失败不致命
@@ -730,6 +637,12 @@ export async function apply(ctx, config = {}) {
                   reply = (cw ? `（暗语【${cw}】）` : '') + ' 🔒 Vault 已锁定，请先在右上角 🐾 面板输入主密码解锁。';
                   return jsonReply(res, 200, { mode: 'direct_apply', codeWord: cw, clean, intent, toolCalls, toolResults, assistant_reply: reply, ok: false, requireUnlock: true });
                 }
+                if (r.ambiguous) {
+                  const names = (r.candidates || []).map((c) => c.label).filter(Boolean);
+                  const msg = `多个凭证的 label 都包含 "${label}"：${names.join(' / ')}。请精确指定其中一个完整 label 后再试。`;
+                  reply = (cw ? `（暗语【${cw}】）` : '') + ' ' + msg;
+                  return jsonReply(res, 200, { mode: 'direct_apply', codeWord: cw, clean, intent, toolCalls, toolResults, assistant_reply: reply, ok: false, ambiguous: true });
+                }
                 if (!r.ok || !r.found) {
                   const msg = label
                     ? `没有找到凭证 label="${label}"，请列出凭证条目确认正确名称。`
@@ -831,6 +744,23 @@ export async function apply(ctx, config = {}) {
             return;
           }
 
+          // —— POST /memorypets-api/change-password   {currentPassword, newPassword}
+          if (method === 'POST' && endpoint === 'change-password') {
+            const body = await readJsonBody(req, res);
+            const current = body?.currentPassword;
+            const next = body?.newPassword;
+            if (typeof current !== 'string' || !current.length || typeof next !== 'string' || next.length < 6) {
+              jsonReply(res, 400, { error: 'currentPassword and a newPassword of at least 6 characters are required' }); return;
+            }
+            try {
+              await service.changeMaster(current, next);
+              jsonReply(res, 200, { ok: true });
+              return;
+            } catch (err) {
+              jsonReply(res, 403, { error: err?.message || 'Password change failed' }); return;
+            }
+          }
+
           // —— 之后所有 endpoint 都需要 vault 已解锁
           if (!service.isUnlocked()) {
             jsonReply(res, 401, { error: 'Vault is locked. Unlock first.' });
@@ -846,6 +776,10 @@ export async function apply(ctx, config = {}) {
 
           // —— POST /memorypets-api/reveal-credential   {label}
           // ONLY returns credential-kind entries (never profile/work). Mirrors service.revealCredential.
+          // New contract from service.revealCredential:
+          //   { value: string, match?: 'fuzzy', matchedLabel?: string }  → exact/fuzzy single hit
+          //   { ambiguous: true, candidates: [{id,label}...] }            → multiple fuzzy matches
+          //   undefined                                                     → no match
           if (method === 'POST' && endpoint === 'reveal-credential') {
             const body = await readJsonBody(req, res);
             const label = body?.label;
@@ -854,8 +788,32 @@ export async function apply(ctx, config = {}) {
               return;
             }
             try {
-              const value = await service.revealCredential(label);
-              jsonReply(res, 200, { ok: true, found: value !== null && value !== undefined, value });
+              const raw = await service.revealCredential(label);
+              if (raw === undefined) {
+                jsonReply(res, 200, { ok: true, found: false });
+                return;
+              }
+              if (raw && raw.ambiguous) {
+                jsonReply(res, 200, {
+                  ok: true,
+                  found: false,
+                  ambiguous: true,
+                  candidates: raw.candidates,
+                  error: 'Multiple credentials match the label; please specify exactly.',
+                });
+                return;
+              }
+              if (raw && typeof raw.value === 'string') {
+                jsonReply(res, 200, {
+                  ok: true,
+                  found: true,
+                  value: raw.value,
+                  ...(raw.match ? { match: raw.match } : {}),
+                  ...(raw.matchedLabel ? { matchedLabel: raw.matchedLabel } : {}),
+                });
+                return;
+              }
+              jsonReply(res, 200, { ok: true, found: false });
               return;
             } catch (err) {
               jsonReply(res, 500, { error: err?.message || 'reveal failed' });
@@ -918,14 +876,5 @@ export async function apply(ctx, config = {}) {
 // be unit-tested without spinning up the whole host plugin).
 export function parseIntentForTest(msg) { return parseIntent(stripCodeWord(msg)); }
 export function detectCodeWordForTest(msg) { return detectCodeWord(msg); }
-
-function resolveAssetsRoot() {
-  try {
-    const root = join(REPO_ROOT, 'assets');
-    if (existsSync(root)) return root;
-  } catch { /* ignore */ }
-  // Fallback (non-module bundlers): assume CWD is repo root
-  return join(process.cwd(), 'assets');
-}
 
 export default { name, inject, apply };

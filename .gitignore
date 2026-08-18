@@ -7,18 +7,16 @@ dist
 .dsh-home/
 .dsh-home_backup*/
 
+# === MemoryPets vault files (encrypted, but never commit envelope/codewords) ===
+*.envelope.json
+*.codewords.json
+
 # === Temporary probe / test scripts (created during debugging) ===
 _*.py
 _*.mjs
 _*.log
 _*.sh
-e2e_test*.py
 _direct_apply_test.py
-
-# === Env / secrets ===
-.env
-.env.local
-.credentials.yaml
 
 # === Editor / OS ===
 .idea/
