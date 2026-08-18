@@ -57,6 +57,38 @@ function useAnimationFrame(stateKey) {
   return state.prefix + state.frames[idx % state.frames.length];
 }
 
+// Detect code-words by watching the dsh composer textarea in real time.
+// When the user types a code-word we briefly switch the floating pet into
+// the "thinking" sprite so the UI itself surfaces the activation — the LLM
+// then has no reason to fabricate a "进入直连模式" banner itself.
+function useCodeWordDetector(codeWords) {
+  React.useEffect(() => {
+    if (typeof document === 'undefined') return () => {};
+    if (!Array.isArray(codeWords) || codeWords.length === 0) return () => {};
+    const words = codeWords.filter(Boolean);
+    const re = new RegExp('(' + words.map((w) =>
+      String(w).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    ).join('|') + ')', 'i');
+
+    const onInput = (ev) => {
+      const ta = ev.target;
+      if (!ta || ta.tagName !== 'TEXTAREA') return;
+      const hit = re.test(ta.value || '');
+      document.documentElement.dataset.memorypetsGate = hit ? 'open' : 'closed';
+    };
+    const onBlur = () => {
+      document.documentElement.dataset.memorypetsGate = 'closed';
+    };
+    document.addEventListener('input', onInput, true);
+    document.addEventListener('blur', onBlur, true);
+    return () => {
+      document.removeEventListener('input', onInput, true);
+      document.removeEventListener('blur', onBlur, true);
+      delete document.documentElement.dataset.memorypetsGate;
+    };
+  }, [codeWords]);
+}
+
 function ShellOverlayComponent() {
   const [stateKey, setStateKey] = React.useState('waiting');
   const [showPanel, setShowPanel] = React.useState(false);
@@ -77,7 +109,21 @@ function ShellOverlayComponent() {
   const [formLabel, setFormLabel] = React.useState('');
   const [formValue, setFormValue] = React.useState('');
   const [adding, setAdding] = React.useState(false);
+  const [gateOpen, setGateOpen] = React.useState(false);
   const imgSrc = useAnimationFrame(stateKey);
+  useCodeWordDetector(codeWords);
+
+  React.useEffect(() => {
+    if (typeof document === 'undefined') return () => {};
+    const sync = () => {
+      const v = document.documentElement.dataset.memorypetsGate;
+      setGateOpen(v === 'open');
+    };
+    sync();
+    const obs = new MutationObserver(sync);
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-memorypets-gate'] });
+    return () => obs.disconnect();
+  }, []);
 
   React.useEffect(() => {
     fetch('/memorypets-api/status')
@@ -240,9 +286,17 @@ function ShellOverlayComponent() {
     userSelect: 'none',
     pointerEvents: 'auto',
     cursor: 'pointer',
-    filter: 'drop-shadow(0 4px 12px rgba(0,0,0,0.18))',
-    transition: 'transform 150ms ease-out',
+    filter: gateOpen
+      ? 'drop-shadow(0 0 18px rgba(255, 196, 80, 0.95)) drop-shadow(0 4px 12px rgba(0,0,0,0.18))'
+      : 'drop-shadow(0 4px 12px rgba(0,0,0,0.18))',
+    transition: 'filter 200ms ease-out, transform 150ms ease-out',
   };
+  // Drive the pet sprite from the gate state: when the user types a code-
+  // word into the dsh composer the pet switches to "thinking" and glows so
+  // the UI surfaces the activation. When the user submits, the pet returns
+  // to "waiting" automatically (next state change wins).
+  const effectiveState = gateOpen ? 'thinking' : stateKey;
+  const finalImgSrc = useAnimationFrame(effectiveState) || imgSrc;
 
   const panelStyle = {
     pointerEvents: 'auto',
@@ -444,7 +498,8 @@ return h(
               showEditCodeWords &&
                 h(React.Fragment, null,
                   h('div', { style: { color: '#6b7280', fontSize: 11, marginBottom: 6 } },
-                    '多个暗语可用英文逗号、空格或中文逗号分隔，会叠加在默认暗语（哥们儿 / 狗狗 / memorypets / ...）之上。'),
+                    '暗语是您私有的"暗号"——多个暗语可用英文逗号、空格或中文逗号分隔。'
+                    + ' 保存后会 REPLACE（覆盖）之前的全部暗语；旧的暗语立即失效。'),
                   h('input', {
                     style: inputStyle,
                     placeholder: '例如：小秘密， 芝麻开门',
@@ -547,7 +602,7 @@ return h(
     ),
     h('img', {
       style: petStyle,
-      src: imgSrc,
+      src: finalImgSrc,
       alt: '记忆宠物',
       onClick: () => setShowPanel((v) => !v),
       title: '点击打开记忆宠物面板',

@@ -69,6 +69,11 @@ harness-plugin/
 # MemoryPets plugin patch layer for the web profile.
 #
 # 把 /path/to/harness-plugin 替换为你的实际路径。
+#
+# 注意：以下四个回调里 resolve 出的"DSH home"目录**永远不会被写死在
+# 任何绝对路径**。它们只读 `process.env.DSH_HOME`，否则用 `os.homedir() +
+# '.dsh'`，以避免在 cwd 是第三方仓库时把该 cwd 的绝对路径泄露到错误
+# 信息里。所有读都 try/catch 返回 null，所有写都 try/catch 静默忽略。
 
 - insert:
     - id: memorypets-host
@@ -76,43 +81,51 @@ harness-plugin/
       config:
         loadEnvelope: !!js |
           async () => {
-            const fs = await import('node:fs/promises');
-            const path = await import('node:path');
-            const dshHome = process.env.DSH_HOME
-              || path.join(process.cwd(), '.dsh-home');
-            const file = path.join(dshHome, 'memorypets.envelope.json');
-            try { return JSON.parse(await fs.readFile(file, 'utf8')); } catch { return null; }
+            try {
+              const fs = await import('node:fs/promises');
+              const path = await import('node:path');
+              const os  = await import('node:os');
+              const dshHome = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+              const file = path.join(dshHome, 'memorypets.envelope.json');
+              return JSON.parse(await fs.readFile(file, 'utf8'));
+            } catch { return null; }
           }
         saveEnvelope: !!js |
           async (env) => {
-            const fs = await import('node:fs/promises');
-            const path = await import('node:path');
-            const dshHome = process.env.DSH_HOME
-              || path.join(process.cwd(), '.dsh-home');
-            const file = path.join(dshHome, 'memorypets.envelope.json');
-            if (env === null) return fs.unlink(file).catch(() => {});
-            await fs.writeFile(file, JSON.stringify(env, null, 2));
+            try {
+              const fs = await import('node:fs/promises');
+              const path = await import('node:path');
+              const os  = await import('node:os');
+              const dshHome = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+              const file = path.join(dshHome, 'memorypets.envelope.json');
+              if (env === null) { try { await fs.unlink(file); } catch {} return; }
+              await fs.mkdir(path.dirname(file), { recursive: true });
+              await fs.writeFile(file, JSON.stringify(env, null, 2));
+            } catch { /* persistence failure is non-fatal */ }
           }
         loadCodeWords: !!js |
           async () => {
-            const fs = await import('node:fs/promises');
-            const path = await import('node:path');
-            const dshHome = process.env.DSH_HOME
-              || path.join(process.cwd(), '.dsh-home');
-            const file = path.join(dshHome, 'memorypets.codewords.json');
             try {
+              const fs = await import('node:fs/promises');
+              const path = await import('node:path');
+              const os  = await import('node:os');
+              const dshHome = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+              const file = path.join(dshHome, 'memorypets.codewords.json');
               const data = JSON.parse(await fs.readFile(file, 'utf8'));
               return Array.isArray(data.words) ? data.words : null;
             } catch { return null; }
           }
         saveCodeWords: !!js |
           async (words) => {
-            const fs = await import('node:fs/promises');
-            const path = await import('node:path');
-            const dshHome = process.env.DSH_HOME
-              || path.join(process.cwd(), '.dsh-home');
-            const file = path.join(dshHome, 'memorypets.codewords.json');
-            await fs.writeFile(file, JSON.stringify({ words: words || [] }, null, 2));
+            try {
+              const fs = await import('node:fs/promises');
+              const path = await import('node:path');
+              const os  = await import('node:os');
+              const dshHome = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+              const file = path.join(dshHome, 'memorypets.codewords.json');
+              await fs.mkdir(path.dirname(file), { recursive: true });
+              await fs.writeFile(file, JSON.stringify({ words: words || [] }, null, 2));
+            } catch { /* persistence failure is non-fatal */ }
           }
 
     - id: memorypets-tools
@@ -123,7 +136,7 @@ harness-plugin/
       name: /path/to/harness-plugin/packages/client/lib/index.mjs
 ```
 
-> 上述 `loadEnvelope` / `saveEnvelope` / `loadCodeWords` / `saveCodeWords` 块复刻了 `packages/host/lib/paths.mjs` 中 `envelopePath()` / `codewordsPath()` 的解析规则（`process.env.DSH_HOME ?? path.join(cwd, '.dsh-home')`）。若想替换为 `dsh-settings-file` / SQLite / 远程 KV 等更安全持久化后端，覆盖这四个回调即可，无需修改 host 代码。
+> 上述 `loadEnvelope` / `saveEnvelope` / `loadCodeWords` / `saveCodeWords` 块复刻了 `packages/host/lib/paths.mjs` 中 `resolveDshHome()` 的解析规则（`process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh')`）。所有读操作 try/catch 返回 `null`，所有写操作 try/catch 静默忽略，保证**任何文件 I/O 异常都不会被冒泡到 UI / LLM 工具层**。若想替换为 `dsh-settings-file` / SQLite / 远程 KV 等更安全持久化后端，覆盖这四个回调即可，无需修改 host 代码。
 ```
 
 4. 进入 deepseek-harness 目录，确保 Node / pnpm 版本正确：

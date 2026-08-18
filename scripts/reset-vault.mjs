@@ -2,9 +2,10 @@
 // MemoryPets vault reset: delete the local envelope so the next dsh web boot
 // starts fresh (user will be prompted to set up a new master password).
 //
-// Resolves DSH_HOME the same way the host plugin does:
+// Resolves DSH_HOME the same way the host plugin does (mirrored from
+// packages/host/lib/paths.mjs so the two never drift):
 //   1. process.env.DSH_HOME
-//   2. <cwd>/.dsh-home
+//   2. <homedir()>/.dsh
 //
 // What we delete:
 //   - <DSH_HOME>/memorypets.envelope.json
@@ -16,12 +17,13 @@
 
 import { existsSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { homedir } from 'node:os';
 
 // Mirror packages/host/lib/paths.mjs so the two never drift apart. We inline
 // here to keep this script a zero-dependency file (the host package may not
 // be installed when the user runs `pnpm reset-vault`).
 function resolveDshHome() {
-  return process.env.DSH_HOME ? resolve(process.env.DSH_HOME) : resolve(process.cwd(), '.dsh-home');
+  return process.env.DSH_HOME ? resolve(process.env.DSH_HOME) : join(homedir(), '.dsh');
 }
 
 const targets = [

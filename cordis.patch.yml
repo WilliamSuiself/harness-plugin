@@ -1,0 +1,96 @@
+# MemoryPets plugin patch layer for the dsh `web` profile + port override.
+#
+# Apply this file by overwriting:
+#   ~/.dsh/profiles/web/cordis.patch.yml
+#
+# ── INSTALL PATH ─────────────────────────────────────────────────────────────
+# The three `name:` entries below contain `<INSTALL_DIR>` as a placeholder.
+# Replace it with the absolute path where you cloned this repo, for example:
+#
+#   sed -i '' "s|<INSTALL_DIR>|$HOME/coding/memorypets/harness-plugin|g" \
+#       cordis.patch.yml
+#
+# This avoids leaking the original maintainer's absolute filesystem path
+# into your committed copy. The downstream tool-load callbacks do not need
+# any path of their own.
+#
+# The two top-level entries do:
+#   1) override `webserver` to fix the listening port to 3080 (avoids
+#      colliding with other dsh services on the default port).
+#   2) `insert:` three Cordis loader entries that mount the MemoryPets
+#      host (vault + tools + asset routes), the LLM-tool registration
+#      layer, and the browser-side floating pet UI.
+#
+# IMPORTANT: none of the persistence callbacks below hard-code any absolute
+# filesystem path. They resolve DSH home as:
+#   1. process.env.DSH_HOME if set
+#   2. otherwise <homedir()>/.dsh  (matches the dsh CLI's own default)
+# This avoids leaking the cwd of whatever process launched us into error
+# messages when vault files haven't been created yet. Every read is wrapped
+# in try/catch that returns null on missing/corrupt files; every write is
+# wrapped in try/catch that silently no-ops on EACCES/EPERM.
+
+- name: webserver
+  config:
+    host: 127.0.0.1
+    port: 3080
+
+- insert:
+    - id: memorypets-host
+      name: <INSTALL_DIR>/packages/host/lib/index.mjs
+      config:
+        loadEnvelope: !!js |
+          async () => {
+            try {
+              const fs = await import('node:fs/promises');
+              const path = await import('node:path');
+              const os  = await import('node:os');
+              const dshHome = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+              const file = path.join(dshHome, 'memorypets.envelope.json');
+              return JSON.parse(await fs.readFile(file, 'utf8'));
+            } catch { return null; }
+          }
+        saveEnvelope: !!js |
+          async (env) => {
+            try {
+              const fs = await import('node:fs/promises');
+              const path = await import('node:path');
+              const os  = await import('node:os');
+              const dshHome = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+              const file = path.join(dshHome, 'memorypets.envelope.json');
+              if (env === null) { try { await fs.unlink(file); } catch {} return; }
+              await fs.mkdir(path.dirname(file), { recursive: true });
+              await fs.writeFile(file, JSON.stringify(env, null, 2));
+            } catch { /* persistence failure is non-fatal */ }
+          }
+        loadCodeWords: !!js |
+          async () => {
+            try {
+              const fs = await import('node:fs/promises');
+              const path = await import('node:path');
+              const os  = await import('node:os');
+              const dshHome = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+              const file = path.join(dshHome, 'memorypets.codewords.json');
+              const data = JSON.parse(await fs.readFile(file, 'utf8'));
+              return Array.isArray(data.words) ? data.words : null;
+            } catch { return null; }
+          }
+        saveCodeWords: !!js |
+          async (words) => {
+            try {
+              const fs = await import('node:fs/promises');
+              const path = await import('node:path');
+              const os  = await import('node:os');
+              const dshHome = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+              const file = path.join(dshHome, 'memorypets.codewords.json');
+              await fs.mkdir(path.dirname(file), { recursive: true });
+              await fs.writeFile(file, JSON.stringify({ words: words || [] }, null, 2));
+            } catch { /* persistence failure is non-fatal */ }
+          }
+
+    - id: memorypets-tools
+      name: <INSTALL_DIR>/packages/host/lib/tools.mjs
+      inject: ['memoryPets', 'tools']
+
+    - id: memorypets-client
+      name: <INSTALL_DIR>/packages/client/lib/index.mjs

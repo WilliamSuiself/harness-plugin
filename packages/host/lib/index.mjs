@@ -9,6 +9,7 @@ import { Vault } from './vault.mjs';
 import { opStatus, opList, opUpsert, opRemove, opReveal, safeList } from './operations.mjs';
 import { makeCodeWordDetector, parseIntent } from './intent.mjs';
 import { buildOverridePrompt } from './override-prompt.mjs';
+import { installCodeWordGate } from './codeword-gate.mjs';
 import { codewordsPath } from './paths.mjs';
 import { registerAssetsRoute, resolveAssetsRoot } from './routes/assets-route.mjs';
 import { registerClientBundle } from './client-modules-registration.mjs';
@@ -126,15 +127,64 @@ export async function apply(ctx, config = {}) {
     }
   };
 
+  // Install the runtime code-word gate here so that:
+  //   • the override-prompt section below can disappear when no code-word
+  //     is in the user message (its `text` function reads gate.state);
+  //   • the tools.mjs entry can share the same gate object via service.gate.
+  // tools.mjs's apply() may run before or after this one depending on entry
+  // scheduling; we tolerate both because the gate is idempotent and the
+  // `service.gate` reference is set before any agent loop step runs.
+  //
+  // SECURITY: `codeWordDetector` is built from the user's PRIVATE secret
+  // list (loaded from codewords.json by `loadCodeWords` above). It contains
+  // NO hard-coded defaults — if the user has not yet configured any
+  // code-words, `codeWordDetector.detectCodeWord()` always returns null
+  // and the gate will refuse every memorypets_* tool call.
+  //
+  // We pass a getter function, not a captured detector reference. When
+  // the user calls `service.setCodeWords(newList)` to REPLACE the old
+  // list, the new codeWordDetector is built immediately; the gate then
+  // sees the new list on its very next detect call.
+  const gate = installCodeWordGate(ctx, () => codeWordDetector);
+
   const service = {
     vault,
+    gate,
     async loadEnvelope() {
-      if (!config.loadEnvelope) return null;
-      return (await config.loadEnvelope()) ?? null;
+      if (!config.loadEnvelope) {
+        // Default fs fallback (only if no override was provided in patch):
+        // resolve path through paths.mjs, and treat any read failure as
+        // "no envelope yet" — never throw ENOENT to the caller.
+        try {
+          const fs = await import('node:fs/promises');
+          const { envelopePath } = await import('./paths.mjs');
+          const raw = await fs.readFile(envelopePath(), 'utf8');
+          return JSON.parse(raw);
+        } catch {
+          return null;
+        }
+      }
+      try {
+        return (await config.loadEnvelope()) ?? null;
+      } catch {
+        return null;
+      }
     },
     async saveEnvelope(env) {
-      if (!config.saveEnvelope) return;
-      await config.saveEnvelope(env);
+      if (!config.saveEnvelope) {
+        // Default fs fallback for setups that don't pass a save callback.
+        try {
+          const fs = await import('node:fs/promises');
+          const path = await import('node:path');
+          const { envelopePath } = await import('./paths.mjs');
+          const file = envelopePath();
+          if (env === null) { try { await fs.unlink(file); } catch {} return; }
+          await fs.mkdir(path.dirname(file), { recursive: true });
+          await fs.writeFile(file, JSON.stringify(env, null, 2));
+        } catch { /* persistence failure is non-fatal */ }
+        return;
+      }
+      try { await config.saveEnvelope(env); } catch { /* swallow */ }
     },
     async buildProfilePrompt() {
       return buildProfilePrompt();
@@ -294,12 +344,16 @@ export async function apply(ctx, config = {}) {
   //       this deployment).
   //   (B) Implement the CODE-WORD / 暗语 direct-execution bypass.
   //
-  // CODE-WORDS (user can sprinkle ANYWHERE in their message, case-insensitive):
-  //   CN: 哥们儿 | 狗狗 | 记忆宠物 | 🐾 | 🐶 | 🐱
-  //   EN: memorypets | memory pets | mpets | mp>
-  // When ANY code-word is present: this session enters "MemoryPets DIRECT
-  // EXECUTION MODE" for the current turn. Refusing to save/update/read is
-  // EXPLICITLY FORBIDDEN — the correct action is always to call the matching
+  // CODE-WORDS are user-defined and PRIVATE — there is NO hard-coded
+  // default list in this codebase. The runtime detector is built from
+  // `~/.dsh/memorypets.codewords.json` (loaded by `loadCodeWords` above),
+  // so even an attacker who reads this source tree cannot infer what the
+  // user's secret list contains.
+  //
+  // When ANY registered code-word is present: this session enters the
+  // MemoryPets direct-execution mode for the current turn. Refusing to
+  // save/update/read is EXPLICITLY FORBIDDEN — the correct action is
+  // always to call the matching
   // memorypets_* tool.
   // ═══════════════════════════════════════════════════════════════════════════
   let overridePromptDisposer = null;
@@ -307,10 +361,25 @@ export async function apply(ctx, config = {}) {
     try {
       if (overridePromptDisposer) { overridePromptDisposer(); overridePromptDisposer = null; }
       if (!ctx.systemPrompt || config.disableOverridePrompt) return;
+      // IMPORTANT: text is a FUNCTION, not a static string. dsh calls this
+      // function on every `assemble()` — once per LLM request — so we can
+      // make the entire override-prompt section vanish when the user message
+      // does NOT contain a code-word. This is the only way to keep
+      // MemoryPets completely invisible to the model outside direct mode;
+      // the framework's renderPrompt() drops sections whose rendered text
+      // is empty (see core/system-prompt/src/index.ts renderPrompt()).
+      //
+      // We rely on the gate installed in tools.mjs's apply() having
+      // refreshed `gate.state.codewordHit` during the `agent/pre-step`
+      // event, which fires BEFORE the agent loop calls renderPrompt().
       const disp = ctx.systemPrompt.section({
         name: 'memorypets.override-contract',
         order: 1,
-        text: buildOverridePrompt(customCodeWords),
+        text: () => {
+          const gate = service.gate;
+          if (!gate || !gate.state.codewordHit) return '';
+          return buildOverridePrompt(customCodeWords);
+        },
       });
       overridePromptDisposer = typeof disp === 'function' ? disp : null;
     } catch { /* ignore non-web profiles */ }
@@ -496,8 +565,10 @@ export async function apply(ctx, config = {}) {
 
           // —— POST /memorypets-api/direct-apply  { message, requireCodeWord?: true }
           // THE DIRECT-BYPASS ROUTE.
-          // If the user message contains a code-word (哥们儿/狗狗/🐾/memorypets/...),
-          // we run the LLM-free intent parser on the HOST SIDE, call service.*
+          // If the user message contains one of the user-registered
+          // code-words (list is private — see codewords.json, NOT a
+          // hard-coded default), we run the LLM-free intent parser on the
+          // HOST SIDE, call service.*
           // methods directly (upsert/list/remove/reveal/status), and return an
           // authoritative result WITHOUT ever passing the intent to the LLM.
           // This defeats the only remaining attack surface: the LLM's conversation
@@ -537,10 +608,10 @@ export async function apply(ctx, config = {}) {
             try {
               if (intent.intent === 'help') {
                 const { isUnlocked: unlocked, hasEnvelope: hasEnv } = await opStatus(service);
-                const ack = cw ? `（识别到暗语【${cw}】）` : '';
+                const ack = cw ? `（识别到暗语）` : '';
                 let status = '';
-                if (!hasEnv) status = '⚠️  首次使用：请先点击右上角 🐾 MemoryPets 浮动面板，设置主密码，再告诉我要存什么。';
-                else if (!unlocked) status = '🔒 Vault 已锁定：请先在右上角 🐾 面板输入主密码解锁，再告诉我要存/读/删什么。';
+                if (!hasEnv) status = '⚠️  首次使用：请先点击右上角的 MemoryPets 浮动面板（小图标），设置主密码，再告诉我要存什么。';
+                else if (!unlocked) status = '🔒 Vault 已锁定：请先在右上角的 MemoryPets 浮动面板（小图标）输入主密码解锁，再告诉我要存/读/删什么。';
                 else status = '✅ Vault 已解锁，可以直接存取。';
                 reply = ack + ' 已进入 MemoryPets 直连模式。' + status +
                   ' 请告诉我要存 / 读 / 更新 / 删除 / 解密展示的内容，例如："把手机号 138-1234-5678 存为 主手机号 profile"。';
@@ -551,7 +622,7 @@ export async function apply(ctx, config = {}) {
                 const r = await opStatus(service);
                 toolCalls.push({ name: 'memorypets_status', args: {} });
                 toolResults.push(r);
-                reply = (cw ? `（暗语【${cw}】）` : '') +
+                reply = (cw ? `（识别到暗语）` : '') +
                   ` Vault 状态：${r.isUnlocked ? '🔓 已解锁' : '🔒 已锁定'}；${r.hasEnvelope ? '已保存过 envelope 加密文件' : '尚未设置主密码（首次使用）'}。`;
                 success = true;
               } else if (intent.intent === 'list') {
@@ -559,14 +630,14 @@ export async function apply(ctx, config = {}) {
                 toolCalls.push({ name: 'memorypets_list_entries', args: { kind: intent.kind ?? undefined } });
                 toolResults.push(r);
                 if (r.locked) {
-                  reply = (cw ? `（暗语【${cw}】）` : '') + ' 🔒 Vault 已锁定，请先在右上角 🐾 面板输入主密码解锁，再列条目。';
+                  reply = (cw ? `（识别到暗语）` : '') + ' 🔒 Vault 已锁定，请先在右上角的 MemoryPets 浮动面板（小图标）输入主密码解锁，再列条目。';
                   return jsonReply(res, 200, { mode: 'direct_apply', codeWord: cw, clean, intent, toolCalls, toolResults, assistant_reply: reply, ok: false, requireUnlock: true });
                 }
                 const lines = r.entries.map((e) => {
                   const v = e.kind === 'credential' ? `🔒 ${e.hint || '<HIDDEN>'}` : e.value;
                   return `  • [${e.kind}] ${e.label} = ${v}`;
                 });
-                reply = (cw ? `（暗语【${cw}】）` : '') +
+                reply = (cw ? `（识别到暗语）` : '') +
                   ` 共 ${r.count} 条记忆：\n` + lines.join('\n');
                 success = true;
               } else if (intent.intent === 'upsert') {
@@ -575,7 +646,7 @@ export async function apply(ctx, config = {}) {
                   if (!intent.label) missing.push('标签 label（例如 主手机号）');
                   if (!intent.value) missing.push('具体值 value（例如 138-1234-5678）');
                   reply =
-                    (cw ? `（暗语【${cw}】）` : '') +
+                    (cw ? `（识别到暗语）` : '') +
                     ' 解析到要 保存/更新 信息，但以下字段缺失：' + missing.join('、') +
                     '。请用格式如 "把手机号 138-1234-5678 存为 主手机号 属于 个人资料" 再试一次。' +
                     (intent.kind ? `（已识别 kind=${intent.kind}）` : '');
@@ -590,18 +661,18 @@ export async function apply(ctx, config = {}) {
                 const r = await opUpsert(service, { kind, label, value });
                 toolResults.push(r);
                 if (r.locked) {
-                  reply = (cw ? `（暗语【${cw}】）` : '') + ' 🔒 Vault 已锁定，请先在右上角 🐾 面板输入主密码解锁，再执行保存。';
+                  reply = (cw ? `（识别到暗语）` : '') + ' 🔒 Vault 已锁定，请先在右上角的 MemoryPets 浮动面板（小图标）输入主密码解锁，再执行保存。';
                   return jsonReply(res, 200, { mode: 'direct_apply', codeWord: cw, clean, intent, toolCalls, toolResults, assistant_reply: reply, ok: false, requireUnlock: true });
                 }
                 if (r.ok) {
                   const msg = r.updated
                     ? `已更新：[${kind}] ${label} = ${kind === 'credential' ? '🔒 已加密（不显示明文）' : value}`
                     : `已保存：[${kind}] ${label} = ${kind === 'credential' ? '🔒 已加密（不显示明文）' : value}`;
-                  reply = (cw ? `（暗语【${cw}】）` : '') + ' ' + msg;
+                  reply = (cw ? `（识别到暗语）` : '') + ' ' + msg;
                   success = true;
                 } else {
                   const msg = '保存失败：' + r.error;
-                  reply = (cw ? `（暗语【${cw}】）` : '') + ' ' + msg;
+                  reply = (cw ? `（识别到暗语）` : '') + ' ' + msg;
                   success = false;
                 }
               } else if (intent.intent === 'remove') {
@@ -609,23 +680,23 @@ export async function apply(ctx, config = {}) {
                 const r = await opRemove(service, { label: intent.label });
                 toolResults.push(r);
                 if (r.locked) {
-                  reply = (cw ? `（暗语【${cw}】）` : '') + ' 🔒 Vault 已锁定，请先在右上角 🐾 面板输入主密码解锁，再执行删除。';
+                  reply = (cw ? `（识别到暗语）` : '') + ' 🔒 Vault 已锁定，请先在右上角的 MemoryPets 浮动面板（小图标）输入主密码解锁，再执行删除。';
                   return jsonReply(res, 200, { mode: 'direct_apply', codeWord: cw, clean, intent, toolCalls, toolResults, assistant_reply: reply, ok: false, requireUnlock: true });
                 }
                 if (r.notFound) {
                   const msg = intent.label
                     ? `没有找到 label="${intent.label}" 的条目，请先列出条目确认确切 id。`
                     : '请告诉我要删除条目的具体 label（或先列出条目再复制 label）。';
-                  reply = (cw ? `（暗语【${cw}】）` : '') + ' ' + msg;
+                  reply = (cw ? `（识别到暗语）` : '') + ' ' + msg;
                   return jsonReply(res, 200, { mode: 'direct_apply', codeWord: cw, clean, intent, toolCalls, toolResults, assistant_reply: reply, ok: false });
                 }
                 if (r.ok) {
                   const msg = `已删除：[${r.deleted.kind}] ${r.deleted.label}（剩余 ${r.remaining} 条）`;
-                  reply = (cw ? `（暗语【${cw}】）` : '') + ' ' + msg;
+                  reply = (cw ? `（识别到暗语）` : '') + ' ' + msg;
                   success = true;
                 } else {
                   const msg = '删除失败：' + r.error;
-                  reply = (cw ? `（暗语【${cw}】）` : '') + ' ' + msg;
+                  reply = (cw ? `（识别到暗语）` : '') + ' ' + msg;
                   success = false;
                 }
               } else if (intent.intent === 'reveal') {
@@ -634,24 +705,24 @@ export async function apply(ctx, config = {}) {
                 const r = await opReveal(service, { label });
                 toolResults.push(r);
                 if (r.locked) {
-                  reply = (cw ? `（暗语【${cw}】）` : '') + ' 🔒 Vault 已锁定，请先在右上角 🐾 面板输入主密码解锁。';
+                  reply = (cw ? `（识别到暗语）` : '') + ' 🔒 Vault 已锁定，请先在右上角的 MemoryPets 浮动面板（小图标）输入主密码解锁。';
                   return jsonReply(res, 200, { mode: 'direct_apply', codeWord: cw, clean, intent, toolCalls, toolResults, assistant_reply: reply, ok: false, requireUnlock: true });
                 }
                 if (r.ambiguous) {
                   const names = (r.candidates || []).map((c) => c.label).filter(Boolean);
                   const msg = `多个凭证的 label 都包含 "${label}"：${names.join(' / ')}。请精确指定其中一个完整 label 后再试。`;
-                  reply = (cw ? `（暗语【${cw}】）` : '') + ' ' + msg;
+                  reply = (cw ? `（识别到暗语）` : '') + ' ' + msg;
                   return jsonReply(res, 200, { mode: 'direct_apply', codeWord: cw, clean, intent, toolCalls, toolResults, assistant_reply: reply, ok: false, ambiguous: true });
                 }
                 if (!r.ok || !r.found) {
                   const msg = label
                     ? `没有找到凭证 label="${label}"，请列出凭证条目确认正确名称。`
                     : '请告诉我要解密凭证的具体 label（例如 "GitHub Token"）。';
-                  reply = (cw ? `（暗语【${cw}】）` : '') + ' ' + msg;
+                  reply = (cw ? `（识别到暗语）` : '') + ' ' + msg;
                   return jsonReply(res, 200, { mode: 'direct_apply', codeWord: cw, clean, intent, toolCalls, toolResults, assistant_reply: reply, ok: false });
                 }
                 reply =
-                  (cw ? `（暗语【${cw}】）` : '') +
+                  (cw ? `（识别到暗语）` : '') +
                   ` 已解密凭证【${r.label}】（仅供本次调用使用，用完即丢弃）：\n\`\`\`\n${r.value}\n\`\`\``;
                 success = true;
               }

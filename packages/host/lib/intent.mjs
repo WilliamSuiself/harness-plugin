@@ -1,26 +1,17 @@
 // CODE-WORD detection + LLM-free intent parser.
 //
-// This exists as a DIRECT BYPASS around the LLM when conversation history
-// (few-shot "refuse to save" assistant turns) overrides our system prompt.
-// If the user message contains ANY code-word → we parse their intent with
-// plain-string rules, then the caller (see ./index.mjs) executes the matching
-// ./operations.mjs function directly on the host side, without touching the LLM.
+// SECURITY: The user's code-word list is a SECRET. It MUST NOT live in this
+// source file (or any file in the repo) — doing so would hard-code the
+// secret in plain text, where anyone with read access to the repo could
+// see it. Instead, code-words are stored encrypted alongside the user's
+// vault (see ./paths.mjs + codewords.json) and passed into
+// `makeCodeWordDetector(customWords)` from runtime storage.
 //
-// All the Chinese keywords live in the KW table below. When you edit a regex,
-// edit the keyword there too — that way the file stays readable for humans and
-// the regex assembly stays consistent (we escape each token with
-// `escapeRegex` before joining, so embedding Chinese characters literally
-// works correctly).
-
-// ──────────────────────────────────────────────────────────────────────────────
-// 1. Keyword tables (the single source of truth)
-// ──────────────────────────────────────────────────────────────────────────────
-
-export const CODE_WORDS = [
-  '哥们儿', '狗狗', '记忆宠物', '🐾', '🐶', '🐱',
-  'memorypets', 'memory pets', 'mpets', 'mp>',
-];
-
+// If `customWords` is empty (or contains only invalid entries), the
+// detector MUST return null for any input — i.e. no substring in the user
+// message qualifies as a code-word. The host then refuses every
+// memorypets_* tool call. This is the safest possible default.
+//
 // Intent verbs (Chinese + English synonyms). Order does not matter; the regex
 // joins them with `|`.
 const KW = {
@@ -49,50 +40,39 @@ function escapeRegex(s) {
 // 2. Code-word detection (regex assembly)
 // ──────────────────────────────────────────────────────────────────────────────
 
+// Build a regex that matches ANY of the user-provided code-words. If
+// `words` is empty or invalid, returns null — meaning "no code-word can
+// possibly match". Callers must handle that case (refuse all gated tools).
 function buildCodeWordRegex(words) {
-  const list = Array.isArray(words) && words.length ? words : CODE_WORDS;
-  const pattern = list.map(escapeRegex).join('|');
+  const list = Array.isArray(words) ? words.filter((w) => typeof w === 'string' && w.trim()) : [];
+  if (list.length === 0) return null;
+  const pattern = list.map((w) => escapeRegex(String(w).trim())).join('|');
   return new RegExp('(' + pattern + ')', 'i');
 }
 
-const DEFAULT_RE = buildCodeWordRegex(CODE_WORDS);
-
-function allWords(customWords) {
-  const extra = Array.isArray(customWords) ? customWords.filter(Boolean) : [];
-  return extra.length ? [...new Set([...CODE_WORDS, ...extra])] : CODE_WORDS;
-}
-
 export function makeCodeWordDetector(customWords) {
-  const words = allWords(customWords);
+  // SECURITY: We use ONLY the words passed in (customWords). We do NOT
+  // merge any hard-coded defaults — defaults would defeat the entire
+  // purpose of letting the user choose their own private list.
+  const words = Array.isArray(customWords)
+    ? customWords.filter((w) => typeof w === 'string' && w.trim()).map((w) => w.trim())
+    : [];
   const re = buildCodeWordRegex(words);
   return {
-    words,
+    words: words.slice(),
     detectCodeWord(text) {
-      if (!text) return null;
+      if (!text || !re) return null;
       const m = String(text).match(re);
       return m ? m[1] : null;
     },
     stripCodeWord(text) {
+      if (!re) return String(text || '').trim();
       return String(text || '')
         .replace(re, ' ')
         .replace(/\s+/g, ' ')
         .trim();
     },
   };
-}
-
-// Backwards-compatible shorthands that use only the built-in default words.
-export function detectCodeWord(text) {
-  if (!text) return null;
-  const m = String(text).match(DEFAULT_RE);
-  return m ? m[1] : null;
-}
-
-export function stripCodeWord(text) {
-  return String(text || '')
-    .replace(DEFAULT_RE, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

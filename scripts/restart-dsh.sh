@@ -20,7 +20,7 @@
 
 set -euo pipefail
 
-DSH_REPO="${DSH_REPO:-$HOME/coding/deepseek-harness-master}"
+DSH_REPO="${DSH_REPO:-$HOME/AI/deepseek-harness-master}"
 DSH_PORT="${DSH_PORT:-3080}"
 
 if [[ ! -d "$DSH_REPO" ]]; then
