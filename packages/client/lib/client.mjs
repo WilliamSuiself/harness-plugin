@@ -13,25 +13,25 @@ export const inject = ['slots'];
 const STATES = {
   standing: {
     label: 'Standing',
-    prefix: '/assets/standing/',
+    prefix: '/memorypets-assets/standing/',
     frames: Array.from({ length: 19 }, (_, i) => String(i + 2).padStart(2, '0') + '.png'),
     fps: 10,
   },
   thinking: {
     label: 'Thinking',
-    prefix: '/assets/thinking/',
+    prefix: '/memorypets-assets/thinking/',
     frames: Array.from({ length: 20 }, (_, i) => String(i + 1).padStart(2, '0') + '.png'),
     fps: 12,
   },
   waitting: {
     label: 'Waiting',
-    prefix: '/assets/waitting/',
+    prefix: '/memorypets-assets/waitting/',
     frames: Array.from({ length: 17 }, (_, i) => String(i + 4).padStart(2, '0') + '.png'),
     fps: 8,
   },
   sleeping: {
     label: 'Sleeping',
-    prefix: '/assets/sleeping/',
+    prefix: '/memorypets-assets/sleeping/',
     frames: Array.from({ length: 18 }, (_, i) => String(i + 3).padStart(2, '0') + '.png'),
     fps: 6,
   },
