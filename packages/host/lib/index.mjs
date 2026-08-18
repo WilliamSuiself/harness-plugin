@@ -9,8 +9,8 @@ import { join, dirname, basename, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Vault } from './vault.mjs';
 import { opStatus, opList, opUpsert, opRemove, opReveal, safeList } from './operations.mjs';
-import { detectCodeWord, stripCodeWord, parseIntent } from './intent.mjs';
-import { OVERRIDE_PROMPT_TEXT } from './override-prompt.mjs';
+import { makeCodeWordDetector, parseIntent } from './intent.mjs';
+import { buildOverridePrompt } from './override-prompt.mjs';
 
 // packages/host/lib/index.mjs → packages/host/lib → packages/host → packages → <repo root>
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
@@ -23,10 +23,67 @@ export const name = 'memorypets-host';
 // 只有 web profile 存在；webServer 提供 HTTP 路由注册；所有 ctx 属性访问都 try/catch，非 web profile 跳过。
 export const inject = ['systemPrompt', 'clientModules', 'webServer', 'tools'];
 
-export function apply(ctx, config = {}) {
+export async function apply(ctx, config = {}) {
   const vault = new Vault();
   let master = null;
   let promptDisposer = null;
+
+  // User-defined custom code-words (loaded from config or disk).
+  // Kept separate from the encrypted vault so it can be read even when locked —
+  // the code-word is what tells the model to *try* to unlock / access MemoryPets.
+  let customCodeWords = [];
+  let codeWordDetector = makeCodeWordDetector(customCodeWords);
+
+  const loadCodeWords = async () => {
+    try {
+      if (typeof config.loadCodeWords === 'function') {
+        const list = await config.loadCodeWords();
+        if (Array.isArray(list)) customCodeWords = list.filter((w) => typeof w === 'string' && w.trim());
+      } else if (typeof config.loadCodeWords === 'object' && Array.isArray(config.loadCodeWords)) {
+        customCodeWords = config.loadCodeWords.filter((w) => typeof w === 'string' && w.trim());
+      } else {
+        const fs = await import('node:fs/promises');
+        const path = await import('node:path');
+        const dshHome = process.env.DSH_HOME || path.default.join(process.cwd(), '.dsh-home');
+        const file = path.default.join(dshHome, 'memorypets.codewords.json');
+        try {
+          const raw = await fs.readFile(file, 'utf8');
+          const data = JSON.parse(raw);
+          if (Array.isArray(data.words)) {
+            customCodeWords = data.words.filter((w) => typeof w === 'string' && w.trim());
+          }
+        } catch { /* not created yet */ }
+      }
+    } catch {}
+    codeWordDetector = makeCodeWordDetector(customCodeWords);
+  };
+
+  const saveCodeWords = async () => {
+    try {
+      if (typeof config.saveCodeWords === 'function') {
+        await config.saveCodeWords([...customCodeWords]);
+      } else if (typeof config.saveCodeWords === 'object' && Array.isArray(config.saveCodeWords)) {
+        // no-op: static array; config layer must reference the same object
+      } else {
+        const fs = await import('node:fs/promises');
+        const path = await import('node:path');
+        const dshHome = process.env.DSH_HOME || path.default.join(process.cwd(), '.dsh-home');
+        const file = path.default.join(dshHome, 'memorypets.codewords.json');
+        await fs.writeFile(file, JSON.stringify({ words: customCodeWords }, null, 2));
+      }
+    } catch {}
+  };
+
+  const setCodeWords = async (list) => {
+    const cleaned = Array.isArray(list)
+      ? list.map((w) => String(w).trim()).filter(Boolean)
+      : [];
+    // Strip duplicates and keep ordering.
+    customCodeWords = [...new Set(cleaned)];
+    codeWordDetector = makeCodeWordDetector(customCodeWords);
+    await saveCodeWords();
+    return [...customCodeWords];
+  };
 
   const persist = async () => {
     if (!config.saveEnvelope) return;
@@ -169,6 +226,18 @@ export function apply(ctx, config = {}) {
       refreshSystemPrompt();
       return buildProfilePrompt();
     },
+    getCodeWords() {
+      return [...customCodeWords];
+    },
+    async setCodeWords(list) {
+      const out = await setCodeWords(list);
+      // The LLM override prompt can only be refreshed from here when the
+      // refreshOverridePrompt() helper has already been defined. If not (e.g.
+      // called before the plugin finishes boot), the in-detector updates are
+      // enough for direct-apply; the prompt text will catch up on next boot.
+      try { refreshOverridePrompt?.(); } catch {}
+      return out;
+    },
   };
 
   // Cordis 要求显式 provide 才能让后续 plugin 通过 inject 引用；
@@ -195,17 +264,23 @@ export function apply(ctx, config = {}) {
   // EXPLICITLY FORBIDDEN — the correct action is always to call the matching
   // memorypets_* tool.
   // ═══════════════════════════════════════════════════════════════════════════
-  try {
-    if (ctx.systemPrompt && !config.disableOverridePrompt) {
-      ctx.systemPrompt.section({
+  let overridePromptDisposer = null;
+  const refreshOverridePrompt = () => {
+    try {
+      if (overridePromptDisposer) { overridePromptDisposer(); overridePromptDisposer = null; }
+      if (!ctx.systemPrompt || config.disableOverridePrompt) return;
+      const disp = ctx.systemPrompt.section({
         name: 'memorypets.override-contract',
         order: 1,
-        text: OVERRIDE_PROMPT_TEXT,
+        text: buildOverridePrompt(customCodeWords),
       });
-    }
-  } catch {
-    // ignore (non-web profiles)
-  }
+      overridePromptDisposer = typeof disp === 'function' ? disp : null;
+    } catch { /* ignore non-web profiles */ }
+  };
+
+  // Load persisted custom code-words and inject both prompts.
+  await loadCodeWords().catch(() => {});
+  try { refreshOverridePrompt(); } catch {}
 
   // 启动时立即刷新一次 systemPrompt（如果此时 vault 有数据）
   try { refreshSystemPrompt(); } catch {}
@@ -525,14 +600,15 @@ export function apply(ctx, config = {}) {
             const body = await readJsonBody(req, res);
             const raw = String(body?.message ?? '');
             const requireCodeWord = body?.requireCodeWord !== false; // default: require code-word
-            const cw = detectCodeWord(raw);
-            const clean = stripCodeWord(raw);
+            const cw = codeWordDetector.detectCodeWord(raw);
+            const clean = codeWordDetector.stripCodeWord(raw);
             if (requireCodeWord && !cw) {
               return jsonReply(res, 200, {
                 mode: 'codeword-required-but-missing',
                 ok: false,
+                knownWords: codeWordDetector.words,
                 message:
-                  '这条消息里没有检测到 MemoryPets 暗语。直连模式必须带上暗语（哥们儿 / 狗狗 / 🐾 / 记忆宠物 / memorypets / mpets），或者将 requireCodeWord 设置为 false。',
+                  '这条消息里没有检测到 MemoryPets 暗语。直连模式必须带上暗语（' + codeWordDetector.words.join(' / ') + '），或者将 requireCodeWord 设置为 false。',
               });
             }
             const intent = parseIntent(clean);
@@ -709,7 +785,8 @@ export function apply(ctx, config = {}) {
             }
           }
 
-          // —— POST /memorypets-api/setup  {password}  (第一次设置密码，直接建空 vault)
+          // —— POST /memorypets-api/setup  {password, codeWords?: string[]}
+          // 第一次设置密码，直接建空 vault，并可选同时设置自定义暗语。
           if (method === 'POST' && endpoint === 'setup') {
             const body = await readJsonBody(req, res);
             const pw = body?.password;
@@ -720,13 +797,38 @@ export function apply(ctx, config = {}) {
               // 建空 vault：unlock(null env) 也行，或者直接 seal 一次空结构落地
               await service.unlock(pw);
               await persist();
+              const codeWordsInput = body?.codeWords;
+              if (codeWordsInput !== undefined) {
+                await service.setCodeWords(Array.isArray(codeWordsInput) ? codeWordsInput : [String(codeWordsInput)]);
+              }
               const entries = await service.listEntries();
-              jsonReply(res, 200, { ok: true, isUnlocked: true, entries });
+              jsonReply(res, 200, { ok: true, isUnlocked: true, entries, codeWords: service.getCodeWords() });
               return;
             } catch (err) {
               jsonReply(res, 500, { error: err?.message || 'Setup failed' });
               return;
             }
+          }
+
+          // —— GET/POST /memorypets-api/codeword
+          if (endpoint === 'codeword') {
+            if (method === 'GET') {
+              jsonReply(res, 200, { codeWords: service.getCodeWords() });
+              return;
+            }
+            if (method === 'POST') {
+              const body = await readJsonBody(req, res);
+              const codeWordsInput = body?.codeWords;
+              if (codeWordsInput === undefined) {
+                jsonReply(res, 400, { error: 'codeWords required' }); return;
+              }
+              const list = Array.isArray(codeWordsInput) ? codeWordsInput : [String(codeWordsInput)];
+              const out = await service.setCodeWords(list);
+              jsonReply(res, 200, { ok: true, codeWords: out });
+              return;
+            }
+            jsonReply(res, 405, { error: 'method not allowed' });
+            return;
           }
 
           // —— 之后所有 endpoint 都需要 vault 已解锁

@@ -59,21 +59,94 @@ function ShellOverlayComponent() {
   const [stateKey, setStateKey] = React.useState('standing');
   const [showPanel, setShowPanel] = React.useState(false);
   const [unlocked, setUnlocked] = React.useState(false);
+  const [hasEnvelope, setHasEnvelope] = React.useState(true);
   const [password, setPassword] = React.useState('');
+  const [setupCodeWord, setSetupCodeWord] = React.useState('');
+  const [codeWords, setCodeWords] = React.useState([]);
+  const [editCodeWord, setEditCodeWord] = React.useState('');
+  const [error, setError] = React.useState(null);
   const [entries, setEntries] = React.useState([]);
   const [formKind, setFormKind] = React.useState('profile');
   const [formLabel, setFormLabel] = React.useState('');
   const [formValue, setFormValue] = React.useState('');
   const imgSrc = useAnimationFrame(stateKey);
 
+  React.useEffect(() => {
+    fetch('/memorypets-api/status')
+      .then((r) => r.json())
+      .then((data) => {
+        setHasEnvelope(!!data.hasEnvelope);
+        setUnlocked(!!data.isUnlocked);
+      })
+      .catch(() => {});
+    fetch('/memorypets-api/codeword')
+      .then((r) => r.json())
+      .then((data) => { if (Array.isArray(data.codeWords)) setCodeWords(data.codeWords); })
+      .catch(() => {});
+  }, []);
+
+  const handleSetup = () => {
+    setError(null);
+    if (!password || password.length < 6) { setError('Password must be at least 6 characters'); return; }
+    const list = setupCodeWord.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean);
+    fetch('/memorypets-api/setup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password, codeWords: list }),
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (!data.ok) throw new Error(data.error || 'Setup failed');
+        setUnlocked(true);
+        setHasEnvelope(true);
+        setPassword('');
+        setSetupCodeWord('');
+        if (Array.isArray(data.codeWords)) setCodeWords(data.codeWords);
+        setEntries(data.entries || []);
+      })
+      .catch((e) => setError(e.message));
+  };
+
   const handleUnlock = () => {
-    // TODO: wire to ctx.remote.memoryPets.unlock(password) after mount.
-    setUnlocked(true);
-    setPassword('');
-    setEntries([
-      { id: 'demo1', kind: 'profile', label: 'Name', value: 'Demo User' },
-      { id: 'demo2', kind: 'work', label: 'Current Project', value: 'MemoryPets plugin' },
-    ]);
+    setError(null);
+    if (!password) { setError('Password required'); return; }
+    fetch('/memorypets-api/unlock', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+    })
+      .then((r) => (r.ok ? r.json() : r.json().then((d) => { throw new Error(d.error || 'Unlock failed'); })))
+      .then((data) => {
+        setUnlocked(true);
+        setPassword('');
+        setEntries(data.entries || []);
+      })
+      .catch((e) => setError(e.message));
+  };
+
+  const handleSaveCodeWord = () => {
+    setError(null);
+    const list = editCodeWord.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean);
+    fetch('/memorypets-api/codeword', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ codeWords: list }),
+    })
+      .then((r) => (r.ok ? r.json() : r.json().then((d) => { throw new Error(d.error || 'Save failed'); })))
+      .then((data) => {
+        if (Array.isArray(data.codeWords)) setCodeWords(data.codeWords);
+        setEditCodeWord('');
+      })
+      .catch((e) => setError(e.message));
+  };
+
+  const handleLock = () => {
+    fetch('/memorypets-api/lock', { method: 'POST' })
+      .then(() => {
+        setUnlocked(false);
+        setEntries([]);
+      })
+      .catch(() => {});
   };
 
   const handleAdd = () => {
@@ -228,23 +301,37 @@ function ShellOverlayComponent() {
         'div',
         { style: panelStyle },
         h('div', { style: { fontWeight: 600, marginBottom: 10, fontSize: 14 } }, 'MemoryPets'),
+        error
+          ? h('div', {
+              style: {
+                padding: '6px 8px',
+                borderRadius: 8,
+                background: '#fef2f2',
+                color: '#b91c1c',
+                fontSize: 12,
+                marginBottom: 10,
+              },
+            }, error)
+          : null,
         unlocked
           ? h(
               React.Fragment,
               null,
               h(
                 'div',
-                { style: { marginBottom: 10, display: 'flex', gap: 6 } },
+                { style: { marginBottom: 10, display: 'flex', gap: 6, flexWrap: 'wrap' } },
                 h(
                   'button',
-                  {
-                    style: btnGhost,
-                    onClick: () => {
-                      setUnlocked(false);
-                      setEntries([]);
-                    },
-                  },
+                  { style: btnGhost, onClick: handleLock },
                   'Lock',
+                ),
+                h(
+                  'div',
+                  { style: { fontSize: 12, color: '#6b7280', display: 'flex', alignItems: 'center', gap: 6 } },
+                  h('span', null, 'Code words:'),
+                  codeWords.length
+                    ? codeWords.map((w) => h('span', { key: w, style: { ...btnGhost, padding: '2px 6px' } }, w))
+                    : h('span', null, '（默认）'),
                 ),
               ),
               entries.length
@@ -253,6 +340,7 @@ function ShellOverlayComponent() {
               h(
                 'div',
                 { style: { borderTop: '1px solid rgba(0,0,0,0.08)', paddingTop: 10, marginTop: 6 } },
+                h('div', { style: { fontWeight: 600, marginBottom: 6, fontSize: 12 } }, 'Add entry'),
                 h(
                   'select',
                   {
@@ -279,27 +367,65 @@ function ShellOverlayComponent() {
                 }),
                 h('button', { style: btnStyle, onClick: handleAdd }, 'Add entry'),
               ),
-            )
-          : h(
-              React.Fragment,
-              null,
               h(
                 'div',
-                { style: { color: '#6b7280', marginBottom: 10 } },
-                'Vault is sealed. Enter master password to unlock.',
+                { style: { borderTop: '1px solid rgba(0,0,0,0.08)', paddingTop: 10, marginTop: 10 } },
+                h('div', { style: { fontWeight: 600, marginBottom: 6, fontSize: 12 } }, 'Custom code words'),
+                h('div', { style: { color: '#6b7280', fontSize: 11, marginBottom: 6 } },
+                  'Use comma, space or Chinese comma to separate multiple words. These are added on top of the default code-words (哥们儿 / 狗狗 / memorypets / ...).'),
+                h('input', {
+                  style: inputStyle,
+                  placeholder: 'e.g. myvoice, 芝麻开门',
+                  value: editCodeWord,
+                  onChange: (ev) => setEditCodeWord(ev.target.value),
+                }),
+                h('button', { style: btnStyle, onClick: handleSaveCodeWord }, 'Save code words'),
               ),
-              h('input', {
-                style: inputStyle,
-                type: 'password',
-                placeholder: 'Master password',
-                value: password,
-                onChange: (ev) => setPassword(ev.target.value),
-                onKeyDown: (ev) => {
-                  if (ev.key === 'Enter') handleUnlock();
-                },
-              }),
-              h('button', { style: btnStyle, onClick: handleUnlock }, 'Unlock'),
-            ),
+            )
+          : hasEnvelope
+            ? h(
+                React.Fragment,
+                null,
+                h(
+                  'div',
+                  { style: { color: '#6b7280', marginBottom: 10 } },
+                  'Vault is sealed. Enter master password to unlock.',
+                ),
+                h('input', {
+                  style: inputStyle,
+                  type: 'password',
+                  placeholder: 'Master password',
+                  value: password,
+                  onChange: (ev) => setPassword(ev.target.value),
+                  onKeyDown: (ev) => {
+                    if (ev.key === 'Enter') handleUnlock();
+                  },
+                }),
+                h('button', { style: btnStyle, onClick: handleUnlock }, 'Unlock'),
+              )
+            : h(
+                React.Fragment,
+                null,
+                h(
+                  'div',
+                  { style: { color: '#6b7280', marginBottom: 10 } },
+                  'Welcome! Create your master password and optionally set a custom code word.',
+                ),
+                h('input', {
+                  style: inputStyle,
+                  type: 'password',
+                  placeholder: 'Master password (≥6 chars)',
+                  value: password,
+                  onChange: (ev) => setPassword(ev.target.value),
+                }),
+                h('input', {
+                  style: inputStyle,
+                  placeholder: 'Custom code word(s) — e.g. myvoice, 芝麻开门',
+                  value: setupCodeWord,
+                  onChange: (ev) => setSetupCodeWord(ev.target.value),
+                }),
+                h('button', { style: btnStyle, onClick: handleSetup }, 'Create vault'),
+              ),
       ),
     h(
       'div',

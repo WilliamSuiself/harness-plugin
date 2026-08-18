@@ -6,24 +6,61 @@
 // plain-string rules, then the caller (see ./index.mjs) executes the matching
 // ./operations.mjs function directly on the host side, without touching the LLM.
 
+// Built-in default code-words. These are always valid unless the user
+// explicitly overrides them by configuring custom code-words in the plugin
+// config (e.g. the setup UI sets a personal code-phrase).
+// Use makeCodeWordDetector(customWords) to get a detector/stripper for a
+// combined word list; for the legacy test interface, the default helpers
+// below still work with the built-ins alone.
 export const CODE_WORDS = [
   '\u54e5\u4eec\u513f', '\u72d7\u72d7', '\u8bb0\u5fc6\u5ba0\u7269', '\ud83d\udc3e', '\ud83d\udc36', '\ud83d\udc31',
   'memorypets', 'memory pets', 'mpets', 'mp>',
 ];
-const CODE_WORD_RE = new RegExp(
-  '(' + CODE_WORDS.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')',
-  'i',
-);
 
+const DEFAULT_RE = buildCodeWordRegex(CODE_WORDS);
+
+function buildCodeWordRegex(words) {
+  const list = Array.isArray(words) && words.length ? words : CODE_WORDS;
+  const pattern = list
+    .map((w) => String(w).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|');
+  return new RegExp('(' + pattern + ')', 'i');
+}
+
+function allWords(customWords) {
+  const extra = Array.isArray(customWords) ? customWords.filter(Boolean) : [];
+  return extra.length ? [...new Set([...CODE_WORDS, ...extra])] : CODE_WORDS;
+}
+
+export function makeCodeWordDetector(customWords) {
+  const words = allWords(customWords);
+  const re = buildCodeWordRegex(words);
+  return {
+    words,
+    detectCodeWord(text) {
+      if (!text) return null;
+      const m = String(text).match(re);
+      return m ? m[1] : null;
+    },
+    stripCodeWord(text) {
+      return String(text || '')
+        .replace(re, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    },
+  };
+}
+
+// Backwards-compatible shorthands that use only the built-in default words.
 export function detectCodeWord(text) {
   if (!text) return null;
-  const m = String(text).match(CODE_WORD_RE);
+  const m = String(text).match(DEFAULT_RE);
   return m ? m[1] : null;
 }
 
 export function stripCodeWord(text) {
   return String(text || '')
-    .replace(CODE_WORD_RE, ' ')
+    .replace(DEFAULT_RE, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
