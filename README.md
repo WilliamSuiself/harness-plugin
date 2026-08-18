@@ -9,21 +9,30 @@ The companion itself is a 720×720 PNG sprite sequence in four moods (`standing 
 ```
 harness-plugin/
 ├── packages/
-│   ├── memorypets/              # Host: vault + crypto + service
-│   │   ├── src/crypto.ts        # Web Crypto primitives (PBKDF2 + AES-GCM)
-│   │   ├── src/vault.ts         # Locked snapshot + unlock/seal
-│   │   ├── src/index.ts         # Cordis plugin: ctx.memoryPets
-│   │   └── src/tools.ts         # dsh tool: reveal credential by label
-│   └── memorypets-client/       # Client: floating pet UI + manager
-│       ├── src/animation.ts     # Mood + frame sequences
-│       ├── src/hooks/           # useSpriteFrames, useAutoMood
-│       ├── src/ui/              # FloatingPet, FloatingPets, UnlockDialog, MemoryManager
-│       ├── src/MemoryPetsApp.tsx# 顶层容器
-│       └── src/index.tsx        # Cordis plugin + system prompt section
+│   ├── host/                    # @memorypets/host — vault + crypto + service + tools
+│   │   └── lib/
+│   │       ├── crypto.mjs       # Web Crypto primitives (PBKDF2 + AES-GCM)
+│   │       ├── vault.mjs        # Locked snapshot + unlock/seal
+│   │       ├── index.mjs        # Cordis plugin: ctx.memoryPets, HTTP routes, direct-apply bypass
+│   │       ├── operations.mjs   # Shared vault actions (status/list/upsert/remove/reveal) —
+│   │       │                    #   single source of truth used by both tools.mjs and index.mjs
+│   │       ├── intent.mjs       # Code-word detection + LLM-free intent parser
+│   │       ├── override-prompt.mjs # High-priority systemPrompt override text
+│   │       └── tools.mjs        # dsh tools: memorypets_status/list_entries/upsert/remove_entry/reveal_credential
+│   └── client/                  # @memorypets/client — floating pet UI + manager
+│       └── lib/
+│           ├── index.mjs        # Host-side stub (registers the client bundle for dsh-client-modules)
+│           ├── client.mjs       # Browser-side plugin source (React.createElement, no JSX)
+│           └── client.bundle.js # Bundled browser output served at /plugins/@memorypets/client/client.js
 ├── examples/
 │   └── cordis.yml               # 装载示例（用 localStorage 存 envelope）
 └── assets/                      # 动画 PNG 序列
 ```
+
+> **Note:** this repository currently ships only the compiled `.mjs` output under
+> `packages/*/lib/`; there is no separate TypeScript `src/` build step yet
+> (the `build`/`typecheck`/`lint` scripts in the root `package.json` are
+> no-ops until each package gains its own `scripts` + TS source).
 
 ## Security model
 
@@ -46,3 +55,9 @@ Manual mood override disables auto mood until cleared.
 ## Status
 
 Skeleton. Crypto and vault implementations compile against Web Crypto and pass the dsh registry conventions (`export const name / inject / apply`). UI components compile against React 18. No automated tests yet; the PoC needs to be loaded into a live `dsh web` profile via the example `cordis.yml` patch.
+
+The vault actions (status / list / upsert / remove / reveal) live in a single
+shared module (`packages/host/lib/operations.mjs`) that both the LLM-facing
+tools (`tools.mjs`) and the code-word direct-apply HTTP bypass (`index.mjs`)
+call into, so the two entry points can never drift out of sync with each
+other.

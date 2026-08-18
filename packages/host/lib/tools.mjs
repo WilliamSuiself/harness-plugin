@@ -17,6 +17,8 @@
 // We therefore auto-detect the sandbox: if globalThis.harness?.defineTool
 // exists we use it; otherwise (tests / direct import) we build an equivalent
 // plain shape via a tiny local defineTool shim.
+import { opStatus, opList, opUpsert, opRemove, opReveal } from './operations.mjs';
+
 export const name = 'memorypets-tools';
 export const inject = ['memoryPets', 'tools'];
 
@@ -26,24 +28,6 @@ function needUnlockReply(hint = '') {
     'in the top-right corner and enter your master password to unlock first, then ' +
     'ask me again. ' + hint;
   return { ok: false, locked: true, message: msg.trim() };
-}
-
-/**
- * Safe async list helper. Uses the async service.listEntries() bridge when
- * available (the Host → Client safe projection) and falls back to a sync
- * vault.list() guarded by try/catch. ALWAYS await it — never synchronous.
- */
-async function safeList(service) {
-  try {
-    if (typeof service.listEntries === 'function') {
-      const out = await service.listEntries();
-      if (Array.isArray(out)) return out;
-    }
-    const direct = service.list?.();
-    return Array.isArray(direct) ? direct : [];
-  } catch {
-    return [];
-  }
 }
 
 /**
@@ -180,9 +164,7 @@ export function apply(ctx) {
         required: [],
       },
       async execute({ codeword }) {
-        const unlocked = !!service.isUnlocked?.();
-        let hasEnv = false;
-        try { hasEnv = !!(service.hasEnvelope ? await service.hasEnvelope() : false); } catch {}
+        const { isUnlocked: unlocked, hasEnvelope: hasEnv } = await opStatus(service);
         const ack = codeword ? `（识别到暗语【${String(codeword)}】）` : '（识别到 MemoryPets 暗语）';
         let status = '';
         if (!hasEnv) {
@@ -218,10 +200,7 @@ export function apply(ctx) {
         required: [],
       },
       async execute() {
-        const isUnlocked = !!service.isUnlocked?.();
-        let hasEnvelope = false;
-        try { hasEnvelope = !!(service.hasEnvelope ? await service.hasEnvelope() : false); } catch {}
-        return { ok: true, isUnlocked, hasEnvelope };
+        return opStatus(service);
       },
     }),
   );
@@ -249,19 +228,13 @@ export function apply(ctx) {
         required: [],
       },
       async execute({ kind }) {
-        if (!service.isUnlocked?.()) {
+        const result = await opList(service, { kind });
+        if (result.locked) {
           return needUnlockReply(
             'Tip: once unlocked, you can re-run memorypets_list_entries to read stored values.',
           );
         }
-        let list = await safeList(service);
-        if (kind) list = list.filter((e) => e.kind === kind);
-        const safe = list.map((e) =>
-          e.kind === 'credential'
-            ? { ...e, value: '<HIDDEN>', hint: e.hint ?? '????????' }
-            : e,
-        );
-        return { ok: true, locked: false, count: safe.length, entries: safe };
+        return result;
       },
     }),
   );
@@ -316,46 +289,18 @@ export function apply(ctx) {
         required: ['kind', 'label', 'value'],
       },
       async execute({ id, kind, label, value, hint }) {
-        if (!['profile', 'work', 'credential'].includes(kind)) {
-          return { ok: false, error: 'kind must be profile | work | credential' };
-        }
-        if (typeof label !== 'string' || !label.trim()) {
-          return { ok: false, error: 'label (non-empty string) is required' };
-        }
-        if (typeof value !== 'string' || value.length === 0) {
-          return { ok: false, error: 'value (non-empty string) is required' };
-        }
-        if (!service.isUnlocked?.()) {
+        const result = await opUpsert(service, { id, kind, label, value, hint });
+        if (result.locked) {
           return needUnlockReply(
             'Tip: unlock from the 🐾 MemoryPets panel first, then I can save ' + label + '.',
           );
         }
-        const list = await safeList(service);
-        let targetId = id;
-        const matched = list.find(
-          (e) => e.kind === kind && String(e.label ?? '').trim() === String(label).trim(),
-        );
-        if (!targetId && matched) targetId = matched.id;
-        const entry = {
-          id: targetId,
-          kind,
-          label: label.trim(),
-          value,
-          ...(kind === 'credential' && hint ? { hint } : {}),
-        };
-        try {
-          await service.upsert(entry);
-        } catch (e) {
-          return { ok: false, error: e instanceof Error ? e.message : String(e) };
-        }
-        const after = await safeList(service);
+        if (!result.ok) return result;
         return {
-          ok: true,
-          message: matched || id
-            ? 'Entry updated: ' + kind + ' / ' + label
-            : 'Entry created: ' + kind + ' / ' + label,
-          updated: !!(matched || id),
-          entryCount: after.length,
+          ...result,
+          message: result.updated
+            ? 'Entry updated: ' + result.kind + ' / ' + result.label
+            : 'Entry created: ' + result.kind + ' / ' + result.label,
         };
       },
     }),
@@ -386,32 +331,14 @@ export function apply(ctx) {
         required: ['id'],
       },
       async execute({ id, confirmKind }) {
-        if (!service.isUnlocked?.()) {
+        const result = await opRemove(service, { id, confirmKind });
+        if (result.locked) {
           return needUnlockReply('Entry deletion requires an unlocked vault.');
         }
-        const list = await safeList(service);
-        const target = list.find((e) => e.id === id);
-        if (!target) {
-          return { ok: false, error: 'No entry found with id=' + id + '. Call memorypets_list_entries and pass the exact id.' };
-        }
-        if (confirmKind && target.kind !== confirmKind) {
-          return {
-            ok: false,
-            error:
-              'Kind mismatch: caller expected ' + confirmKind + ' but actual entry kind is ' + target.kind + '.',
-          };
-        }
-        try {
-          await service.remove(id);
-        } catch (e) {
-          return { ok: false, error: e instanceof Error ? e.message : String(e) };
-        }
-        const after = await safeList(service);
+        if (!result.ok) return result;
         return {
-          ok: true,
-          message: 'Deleted entry: ' + target.kind + ' / ' + target.label,
-          deleted: { id: target.id, kind: target.kind, label: target.label },
-          remaining: after.length,
+          ...result,
+          message: 'Deleted entry: ' + result.deleted.kind + ' / ' + result.deleted.label,
         };
       },
     }),
@@ -440,46 +367,21 @@ export function apply(ctx) {
         required: ['label'],
       },
       async execute({ label }) {
-        if (typeof label !== 'string' || !label.trim()) {
-          return { ok: false, error: 'label (non-empty string) is required' };
-        }
-        if (!service.isUnlocked?.()) {
+        const result = await opReveal(service, { label });
+        if (result.locked) {
           return needUnlockReply('Credential decryption requires an unlocked vault.');
         }
-        const list = await safeList(service);
-        const key = String(label ?? '').trim().toLowerCase();
-        const exact = list.find(
-          (e) =>
-            e.kind === 'credential' &&
-            String(e.label ?? '').trim().toLowerCase() === key,
-        );
-        if (exact && typeof exact.value === 'string') {
-          return { ok: true, found: true, label: exact.label, value: exact.value };
+        if (result.ok) return result;
+        if (result.found === false) {
+          return {
+            ...result,
+            reason:
+              'No credential entry matched label="' +
+              label +
+              '". Call memorypets_list_entries with kind=credential to see available entries.',
+          };
         }
-        const fuzzy = list.find(
-          (e) =>
-            e.kind === 'credential' &&
-            String(e.label ?? '').toLowerCase().includes(key),
-        );
-        if (fuzzy && typeof fuzzy.value === 'string') {
-          return { ok: true, found: true, label: fuzzy.label, value: fuzzy.value, match: 'fuzzy' };
-        }
-        // Bridge: if host-loaded vault stores secrets differently, go through the service
-        // revealCredential helper (reads from the raw vault, not the filtered client bridge).
-        if (typeof service.revealCredential === 'function') {
-          const raw = await service.revealCredential(label);
-          if (typeof raw === 'string' && raw.length > 0) {
-            return { ok: true, found: true, label, value: raw, match: 'service-bridge' };
-          }
-        }
-        return {
-          ok: false,
-          found: false,
-          reason:
-            'No credential entry matched label="' +
-            label +
-            '". Call memorypets_list_entries with kind=credential to see available entries.',
-        };
+        return result;
       },
     }),
   );
