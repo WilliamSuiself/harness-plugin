@@ -58,7 +58,7 @@ function useAnimationFrame(stateKey) {
 }
 
 function ShellOverlayComponent() {
-  const [stateKey, setStateKey] = React.useState('standing');
+  const [stateKey, setStateKey] = React.useState('waiting');
   const [showPanel, setShowPanel] = React.useState(false);
   const [unlocked, setUnlocked] = React.useState(false);
   const [hasEnvelope, setHasEnvelope] = React.useState(true);
