@@ -93,7 +93,7 @@ function latestUserText(messages) {
 // reference, it would still match the old list. The getDetector callback
 // always returns the latest instance from host.codeWordDetector.
 const FALLBACK_DET = { words: [], detectCodeWord: () => null, stripCodeWord: (t) => String(t || '').trim() };
-export function createCodeWordGate(detectorOrGetter) {
+export function createCodeWordGate(detectorOrGetter, initialEnabled = true) {
   const getDetector = typeof detectorOrGetter === 'function'
     ? detectorOrGetter
     : () => detectorOrGetter || FALLBACK_DET;
@@ -104,6 +104,10 @@ export function createCodeWordGate(detectorOrGetter) {
     detectedCodeword: null,
     updatedAt: 0,
   };
+  // Whether the gate is currently active. When disabled (user turned off
+  // "暗语门槛" in settings), gated tools run unconditionally — no code-word
+  // detection is performed at all.
+  let enabled = !!initialEnabled;
 
   function captureFromMessages(messages) {
     const text = latestUserText(messages);
@@ -140,6 +144,8 @@ export function createCodeWordGate(detectorOrGetter) {
     captureFromMessages,
     isGatedToolName,
     refuseResult,
+    isEnabled: () => enabled,
+    setEnabled: (v) => { enabled = !!v; },
     TOOL_NAME_PREFIX,
   };
 }
@@ -151,8 +157,8 @@ export function createCodeWordGate(detectorOrGetter) {
  *
  * Returns the gate object so callers can inspect `state` for tests.
  */
-export function installCodeWordGate(ctx, detectorOrGetter) {
-  const gate = createCodeWordGate(detectorOrGetter);
+export function installCodeWordGate(ctx, detectorOrGetter, initialEnabled = true) {
+  const gate = createCodeWordGate(detectorOrGetter, initialEnabled);
 
   // 1. agent/pre-step: capture the latest user message into gate state.
   // Note: do NOT probe ctx.scope or any other non-injected property — the
@@ -178,7 +184,7 @@ export function installCodeWordGate(ctx, detectorOrGetter) {
         // to non-injected properties. Fall back to no name → next().
         let name;
         try { name = exec && exec.name; } catch { name = undefined; }
-        if (!gate.isGatedToolName(name)) return next();
+        if (!gate.isEnabled() || !gate.isGatedToolName(name)) return next();
         // Re-capture the latest user text defensively in case no agent
         // listener is wired (e.g. tool invoked from a script).
         if (Date.now() - gate.state.updatedAt > 5000 || !gate.state.lastUserMessage) {

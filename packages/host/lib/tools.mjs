@@ -151,7 +151,8 @@ function simpleTool({ name, description, parameters, readOnly, execute, gate }) 
       // inner execute runs. This is the ground-truth check — the prompt
       // wording alone is not enough because the LLM can still call the
       // tool while fabricating a code-word.
-      if (gate && gate.isGatedToolName(name) && !gate.state.codewordHit) {
+      const gateActive = !gate || gate.isEnabled?.() !== false;
+      if (gateActive && gate && gate.isGatedToolName(name) && !gate.state.codewordHit) {
         return gate.refuseResult('CODE_WORD_REQUIRED');
       }
       try {

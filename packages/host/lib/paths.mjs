@@ -41,6 +41,8 @@ export function resolveDshHome() {
 
 export const ENVELOPE_FILENAME = 'memorypets.envelope.json';
 export const CODEWORDS_FILENAME = 'memorypets.codewords.json';
+export const SETTINGS_FILENAME = 'memorypets.settings.json';
+export const NOTES_FILENAME = 'memorypets.notes.json';
 
 export function envelopePath() {
   return join(resolveDshHome(), ENVELOPE_FILENAME);
@@ -48,6 +50,18 @@ export function envelopePath() {
 
 export function codewordsPath() {
   return join(resolveDshHome(), CODEWORDS_FILENAME);
+}
+
+// Non-secret settings (feature toggles). Never contains passwords/secrets —
+// safe to read even while the vault is locked.
+export function settingsPath() {
+  return join(resolveDshHome(), SETTINGS_FILENAME);
+}
+
+// Plaintext entries file, used ONLY when the user has explicitly disabled
+// encryption via settings. Never written to while encryption is enabled.
+export function notesPath() {
+  return join(resolveDshHome(), NOTES_FILENAME);
 }
 
 export { legacyDshHome };

@@ -6,11 +6,12 @@
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Vault } from './vault.mjs';
+import { PlainStore } from './plain-store.mjs';
 import { opStatus, opList, opUpsert, opRemove, opReveal, opExportMarkdown, safeList } from './operations.mjs';
 import { makeCodeWordDetector, parseIntent } from './intent.mjs';
 import { buildOverridePrompt } from './override-prompt.mjs';
 import { installCodeWordGate } from './codeword-gate.mjs';
-import { codewordsPath } from './paths.mjs';
+import { codewordsPath, settingsPath, notesPath, envelopePath } from './paths.mjs';
 import { registerAssetsRoute, resolveAssetsRoot } from './routes/assets-route.mjs';
 import { registerClientBundle } from './client-modules-registration.mjs';
 
@@ -25,9 +26,39 @@ export const name = 'memorypets-host';
 export const inject = ['systemPrompt', 'clientModules', 'webServer', 'tools'];
 
 export async function apply(ctx, config = {}) {
-  const vault = new Vault();
+  let vault = new Vault();
   let master = null;
   let promptDisposer = null;
+
+  // Non-secret feature toggles. Both default to `true` — MemoryPets keeps
+  // its original secure-by-default behavior (encrypted-at-rest vault,
+  // code-word gate on tool calls). Users who want to reposition MemoryPets
+  // as a non-private notes tool can turn either off from the "安全设置"
+  // panel; both settings are safe to persist unencrypted since they never
+  // contain secrets.
+  let settings = { encryptionEnabled: true, codewordGateEnabled: true };
+
+  const loadSettings = async () => {
+    try {
+      const fs = await import('node:fs/promises');
+      const raw = await fs.readFile(settingsPath(), 'utf8');
+      const data = JSON.parse(raw);
+      settings = {
+        encryptionEnabled: data.encryptionEnabled !== false,
+        codewordGateEnabled: data.codewordGateEnabled !== false,
+      };
+    } catch { /* not created yet — keep secure defaults */ }
+  };
+
+  const saveSettings = async () => {
+    try {
+      const fs = await import('node:fs/promises');
+      const path = await import('node:path');
+      const file = settingsPath();
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, JSON.stringify(settings, null, 2));
+    } catch { /* persistence failure is non-fatal */ }
+  };
 
   // User-defined custom code-words (loaded from config or disk).
   // Kept separate from the encrypted vault so it can be read even when locked —
@@ -81,6 +112,19 @@ export async function apply(ctx, config = {}) {
   };
 
   const persist = async () => {
+    if (!settings.encryptionEnabled) {
+      // Plaintext mode: write directly to notesPath(), bypassing the
+      // encrypted-envelope config hooks entirely (there is no password).
+      try {
+        const fs = await import('node:fs/promises');
+        const path = await import('node:path');
+        const file = notesPath();
+        await fs.mkdir(path.dirname(file), { recursive: true });
+        const snap = await vault.sealWith();
+        await fs.writeFile(file, JSON.stringify(snap, null, 2));
+      } catch { /* persistence failure is non-fatal */ }
+      return;
+    }
     if (!config.saveEnvelope) return;
     if (master === null) return;
     const env = await vault.sealWith(master);
@@ -145,10 +189,25 @@ export async function apply(ctx, config = {}) {
   // the user calls `service.setCodeWords(newList)` to REPLACE the old
   // list, the new codeWordDetector is built immediately; the gate then
   // sees the new list on its very next detect call.
-  const gate = installCodeWordGate(ctx, () => codeWordDetector);
+  await loadSettings().catch(() => {});
+  const gate = installCodeWordGate(ctx, () => codeWordDetector, settings.codewordGateEnabled);
+
+  // Plaintext mode (encryption disabled): swap in a PlainStore and
+  // auto-unlock it immediately from notesPath() — there is no password
+  // gate in this mode, so the vault is "unlocked" as soon as the plugin
+  // boots.
+  if (!settings.encryptionEnabled) {
+    vault = new PlainStore();
+    let stored = null;
+    try {
+      const fs = await import('node:fs/promises');
+      stored = JSON.parse(await fs.readFile(notesPath(), 'utf8'));
+    } catch { /* first use — start empty */ }
+    try { await vault.unlock(stored); } catch { /* corrupted notes file — start empty */ }
+  }
 
   const service = {
-    vault,
+    get vault() { return vault; },
     gate,
     async loadEnvelope() {
       if (!config.loadEnvelope) {
@@ -326,6 +385,66 @@ export async function apply(ctx, config = {}) {
       master = next;
       await persist();
     },
+    getSettings() {
+      return { ...settings };
+    },
+    // Toggle encryption / code-word-gate. Both migrations below are best
+    // effort and synchronous with the caller (small entry counts) so the
+    // REST handler can return the final state in one round trip.
+    //
+    //   encryptionEnabled: true → false   requires the vault to be unlocked
+    //     (we need the plaintext entries); writes notesPath(), deletes the
+    //     encrypted envelope file.
+    //   encryptionEnabled: false → true   requires `password` (>=6 chars);
+    //     seals current entries into a fresh encrypted envelope, deletes
+    //     notesPath().
+    async setSettings(partial = {}) {
+      const wantEncryption = typeof partial.encryptionEnabled === 'boolean'
+        ? partial.encryptionEnabled
+        : settings.encryptionEnabled;
+      const wantGate = typeof partial.codewordGateEnabled === 'boolean'
+        ? partial.codewordGateEnabled
+        : settings.codewordGateEnabled;
+
+      if (wantEncryption !== settings.encryptionEnabled) {
+        const fs = await import('node:fs/promises');
+        if (wantEncryption === false) {
+          // encrypted → plaintext
+          if (!vault.isUnlocked()) throw new Error('Vault must be unlocked to disable encryption.');
+          const entries = vault.list();
+          const plain = new PlainStore();
+          await plain.unlock({ version: 1, entries });
+          const path = await import('node:path');
+          const file = notesPath();
+          await fs.mkdir(path.dirname(file), { recursive: true });
+          await fs.writeFile(file, JSON.stringify({ version: 1, entries }, null, 2));
+          try { await fs.unlink(envelopePath()); } catch {}
+          vault = plain;
+          master = null;
+        } else {
+          // plaintext → encrypted
+          if (typeof partial.password !== 'string' || partial.password.length < 6) {
+            throw new Error('A master password (at least 6 characters) is required to enable encryption.');
+          }
+          const entries = vault.isUnlocked() ? vault.list() : [];
+          const fresh = new Vault();
+          await fresh.unlock(null, partial.password);
+          for (const e of entries) fresh.upsert(e);
+          const env = await fresh.sealWith(partial.password);
+          await fs.writeFile(envelopePath(), JSON.stringify(env, null, 2));
+          try { await fs.unlink(notesPath()); } catch {}
+          vault = fresh;
+          master = partial.password;
+        }
+      }
+
+      settings = { encryptionEnabled: wantEncryption, codewordGateEnabled: wantGate };
+      gate.setEnabled(wantGate);
+      await saveSettings();
+      refreshSystemPrompt();
+      try { refreshOverridePrompt?.(); } catch {}
+      return { ...settings };
+    },
   };
 
   // Cordis 要求显式 provide 才能让后续 plugin 通过 inject 引用；
@@ -377,7 +496,12 @@ export async function apply(ctx, config = {}) {
         order: 1,
         text: () => {
           const gate = service.gate;
-          if (!gate || !gate.state.codewordHit) return '';
+          if (!gate) return '';
+          // Gate disabled (user turned off 暗语门槛): MemoryPets tools are
+          // always callable, so the override contract should always be
+          // active — there is no "code-word present" condition to wait for.
+          if (gate.isEnabled && !gate.isEnabled()) return buildOverridePrompt(customCodeWords);
+          if (!gate.state.codewordHit) return '';
           return buildOverridePrompt(customCodeWords);
         },
       });
@@ -810,6 +934,31 @@ export async function apply(ctx, config = {}) {
               const out = await service.setCodeWords(list);
               jsonReply(res, 200, { ok: true, codeWords: out });
               return;
+            }
+            jsonReply(res, 405, { error: 'method not allowed' });
+            return;
+          }
+
+          // —— GET/POST /memorypets-api/settings
+          // Non-secret feature toggles (encryptionEnabled / codewordGateEnabled).
+          // GET is always allowed (even locked) since the payload never contains
+          // secrets. POST { encryptionEnabled?, codewordGateEnabled?, password? }
+          // — `password` is required when flipping encryptionEnabled false→true.
+          if (endpoint === 'settings') {
+            if (method === 'GET') {
+              jsonReply(res, 200, { ok: true, ...service.getSettings() });
+              return;
+            }
+            if (method === 'POST') {
+              const body = await readJsonBody(req, res);
+              try {
+                const out = await service.setSettings(body || {});
+                jsonReply(res, 200, { ok: true, ...out });
+                return;
+              } catch (err) {
+                jsonReply(res, 400, { error: err?.message || 'Failed to update settings' });
+                return;
+              }
             }
             jsonReply(res, 405, { error: 'method not allowed' });
             return;

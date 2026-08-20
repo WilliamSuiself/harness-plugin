@@ -110,6 +110,11 @@ function ShellOverlayComponent() {
   const [formValue, setFormValue] = React.useState('');
   const [adding, setAdding] = React.useState(false);
   const [gateOpen, setGateOpen] = React.useState(false);
+  const [encryptionEnabled, setEncryptionEnabled] = React.useState(true);
+  const [codewordGateEnabled, setCodewordGateEnabled] = React.useState(true);
+  const [showEnableEncryption, setShowEnableEncryption] = React.useState(false);
+  const [enableEncPwd, setEnableEncPwd] = React.useState('');
+  const [enableEncPwd2, setEnableEncPwd2] = React.useState('');
   const imgSrc = useAnimationFrame(stateKey);
   useCodeWordDetector(codeWords);
 
@@ -140,6 +145,13 @@ function ShellOverlayComponent() {
     fetch('/memorypets-api/entries')
       .then((r) => r.json())
       .then((data) => { if (Array.isArray(data.entries)) setEntries(data.entries); })
+      .catch(() => {});
+    fetch('/memorypets-api/settings')
+      .then((r) => r.json())
+      .then((data) => {
+        if (typeof data.encryptionEnabled === 'boolean') setEncryptionEnabled(data.encryptionEnabled);
+        if (typeof data.codewordGateEnabled === 'boolean') setCodewordGateEnabled(data.codewordGateEnabled);
+      })
       .catch(() => {});
   }, []);
 
@@ -227,6 +239,54 @@ function ShellOverlayComponent() {
         setEntries([]);
       })
       .catch(() => {});
+  };
+
+  const handleToggleCodewordGate = () => {
+    setError(null);
+    const next = !codewordGateEnabled;
+    fetch('/memorypets-api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ codewordGateEnabled: next }),
+    })
+      .then((r) => (r.ok ? r.json() : r.json().then((d) => { throw new Error(d.error || '设置更新失败'); })))
+      .then((data) => {
+        if (typeof data.codewordGateEnabled === 'boolean') setCodewordGateEnabled(data.codewordGateEnabled);
+      })
+      .catch((e) => setError(e.message || '设置更新失败'));
+  };
+
+  const handleDisableEncryption = () => {
+    setError(null);
+    fetch('/memorypets-api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ encryptionEnabled: false }),
+    })
+      .then((r) => (r.ok ? r.json() : r.json().then((d) => { throw new Error(d.error || '设置更新失败'); })))
+      .then((data) => {
+        if (typeof data.encryptionEnabled === 'boolean') setEncryptionEnabled(data.encryptionEnabled);
+      })
+      .catch((e) => setError(e.message || '设置更新失败'));
+  };
+
+  const handleEnableEncryption = () => {
+    setError(null);
+    if (!enableEncPwd || enableEncPwd.length < 6) { setError('主密码至少需要6个字符'); return; }
+    if (enableEncPwd !== enableEncPwd2) { setError('两次输入的主密码不一致'); return; }
+    fetch('/memorypets-api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ encryptionEnabled: true, password: enableEncPwd }),
+    })
+      .then((r) => (r.ok ? r.json() : r.json().then((d) => { throw new Error(d.error || '设置更新失败'); })))
+      .then((data) => {
+        if (typeof data.encryptionEnabled === 'boolean') setEncryptionEnabled(data.encryptionEnabled);
+        setEnableEncPwd('');
+        setEnableEncPwd2('');
+        setShowEnableEncryption(false);
+      })
+      .catch((e) => setError(e.message || '设置更新失败'));
   };
 
   const handleExport = () => {
@@ -551,6 +611,49 @@ return h(
                   }),
                   h('button', { style: btnStyle, onClick: handleChangePassword }, '更新主密码'),
                 ),
+              h(
+                'div',
+                { style: { borderTop: '1px solid rgba(0,0,0,0.06)', paddingTop: 8, marginTop: 8 } },
+                h('label', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, marginBottom: 6, cursor: 'pointer' } },
+                  h('input', {
+                    type: 'checkbox',
+                    checked: codewordGateEnabled,
+                    onChange: handleToggleCodewordGate,
+                  }),
+                  '启用暗语门槛（关闭后，随时可以让我读写记忆，无需先说暗语）',
+                ),
+                h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, flexWrap: 'wrap' } },
+                  h('label', { style: { display: 'flex', alignItems: 'center', gap: 6, cursor: encryptionEnabled ? 'pointer' : 'default' } },
+                    h('input', {
+                      type: 'checkbox',
+                      checked: encryptionEnabled,
+                      onChange: () => {
+                        if (encryptionEnabled) handleDisableEncryption();
+                        else setShowEnableEncryption((v) => !v);
+                      },
+                    }),
+                    '启用加密存储（关闭后条目以明文保存在本机，适合非私密的工作笔记/计划/家庭事务）',
+                  ),
+                ),
+                showEnableEncryption && !encryptionEnabled &&
+                  h(React.Fragment, null,
+                    h('input', {
+                      style: inputStyle,
+                      type: 'password',
+                      placeholder: '新主密码（至少6个字符）',
+                      value: enableEncPwd,
+                      onChange: (ev) => setEnableEncPwd(ev.target.value),
+                    }),
+                    h('input', {
+                      style: inputStyle,
+                      type: 'password',
+                      placeholder: '确认新主密码',
+                      value: enableEncPwd2,
+                      onChange: (ev) => setEnableEncPwd2(ev.target.value),
+                    }),
+                    h('button', { style: btnStyle, onClick: handleEnableEncryption }, '启用加密'),
+                  ),
+              ),
             ),
           )
         : hasEnvelope
