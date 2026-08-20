@@ -6,7 +6,7 @@
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Vault } from './vault.mjs';
-import { opStatus, opList, opUpsert, opRemove, opReveal, safeList } from './operations.mjs';
+import { opStatus, opList, opUpsert, opRemove, opReveal, opExportMarkdown, safeList } from './operations.mjs';
 import { makeCodeWordDetector, parseIntent } from './intent.mjs';
 import { buildOverridePrompt } from './override-prompt.mjs';
 import { installCodeWordGate } from './codeword-gate.mjs';
@@ -842,6 +842,25 @@ export async function apply(ctx, config = {}) {
           if (method === 'POST' && endpoint === 'lock') {
             service.lock();
             jsonReply(res, 200, { ok: true, isUnlocked: false });
+            return;
+          }
+
+          // —— GET /memorypets-api/export  → Markdown 文件下载（凭证明文不导出）
+          if (method === 'GET' && endpoint === 'export') {
+            const r = await opExportMarkdown(service);
+            if (!r.ok) {
+              jsonReply(res, r.locked ? 401 : 500, { error: r.locked ? 'Vault is locked. Unlock first.' : (r.error || 'export failed') });
+              return;
+            }
+            const body = r.markdown;
+            const filename = `memorypets-export-${new Date().toISOString().slice(0, 10)}.md`;
+            res.writeHead(200, {
+              'Content-Type': 'text/markdown; charset=utf-8',
+              'Content-Length': Buffer.byteLength(body),
+              'Content-Disposition': `attachment; filename="${filename}"`,
+              'Cache-Control': 'no-store',
+            });
+            res.end(body);
             return;
           }
 

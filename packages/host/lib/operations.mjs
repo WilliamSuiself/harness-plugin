@@ -157,6 +157,47 @@ export async function opRemove(service, { id, label, confirmKind } = {}) {
  *   - { ok: false, locked: true }                                          on locked vault
  *   - { ok: false, error }                                                 on missing/empty label
  */
+const KIND_LABELS = { profile: '个人资料', work: '工作', credential: '凭证' };
+
+/**
+ * Builds a Markdown export of the current vault snapshot.
+ *
+ * SECURITY: credential values are NEVER included in the export — only the
+ * label (and hint, if any) are listed, with a note that the value must be
+ * retrieved via reveal. This keeps a plain-text export file from becoming
+ * a secondary leak surface for secrets.
+ */
+export async function opExportMarkdown(service) {
+  if (!service.isUnlocked?.()) return { ok: false, locked: true };
+  const list = await safeList(service);
+  const byKind = { profile: [], work: [], credential: [] };
+  for (const e of list) {
+    if (byKind[e.kind]) byKind[e.kind].push(e);
+    else (byKind[e.kind] = byKind[e.kind] || []).push(e);
+  }
+  const lines = [
+    '# MemoryPets 记忆库导出',
+    '',
+    `导出时间：${new Date().toISOString()}`,
+    `条目总数：${list.length}`,
+    '',
+  ];
+  for (const kind of Object.keys(byKind)) {
+    const entries = byKind[kind];
+    if (!entries.length) continue;
+    lines.push(`## ${KIND_LABELS[kind] || kind}`, '');
+    for (const e of entries) {
+      if (kind === 'credential') {
+        lines.push(`- **${e.label}**：🔒 已加密，内容未导出（如需查看请使用揭示功能）`);
+      } else {
+        lines.push(`- **${e.label}**：${e.value}`);
+      }
+    }
+    lines.push('');
+  }
+  return { ok: true, markdown: lines.join('\n'), count: list.length };
+}
+
 export async function opReveal(service, { label } = {}) {
   if (typeof label !== 'string' || !label.trim()) {
     return { ok: false, error: 'label (non-empty string) is required' };

@@ -229,6 +229,23 @@ function ShellOverlayComponent() {
       .catch(() => {});
   };
 
+  const handleExport = () => {
+    setError(null);
+    fetch('/memorypets-api/export')
+      .then((r) => (r.ok ? r.blob() : r.json().then((d) => { throw new Error(d.error || '导出失败'); })))
+      .then((blob) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `memorypets-export-${new Date().toISOString().slice(0, 10)}.md`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      })
+      .catch((e) => setError(e.message || '导出失败'));
+  };
+
   const handleAdd = () => {
     setError(null);
     if (!formLabel || !formValue) { setError('请填写标签和内容'); return; }
@@ -491,9 +508,10 @@ return h(
               'div',
               { style: { borderTop: '1px solid rgba(0,0,0,0.08)', paddingTop: 10, marginTop: 10 } },
               h('div', { style: { fontWeight: 600, marginBottom: 6, fontSize: 12 } }, '安全设置'),
-              h('div', { style: { display: 'flex', gap: 8, marginBottom: 8 } },
+              h('div', { style: { display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap' } },
                 h('button', { style: btnGhost, onClick: () => setShowEditCodeWords((v) => !v) }, '修改暗语'),
                 h('button', { style: btnGhost, onClick: () => setShowChangePassword((v) => !v) }, '修改主密码'),
+                h('button', { style: btnGhost, onClick: handleExport }, '导出为 Markdown'),
               ),
               showEditCodeWords &&
                 h(React.Fragment, null,
