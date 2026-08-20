@@ -45,15 +45,27 @@ export async function opList(service, { kind } = {}) {
   return { ok: true, locked: false, count: safe.length, entries: safe };
 }
 
-export async function opUpsert(service, { id, kind, label, value, hint } = {}) {
-  if (!['profile', 'work', 'credential'].includes(kind)) {
-    return { ok: false, error: 'kind must be profile | work | credential' };
+// 'note' is the current general-purpose kind (work items / plans / family
+// matters / anything non-secret). 'profile' and 'work' are accepted here
+// ONLY so pre-existing entries can still be edited in place — new saves
+// should use 'note' or 'credential'.
+const VALID_KINDS = ['note', 'profile', 'work', 'credential'];
+
+export async function opUpsert(service, { id, kind, label, value, hint, tags, dueDate } = {}) {
+  if (!VALID_KINDS.includes(kind)) {
+    return { ok: false, error: 'kind must be note | credential (profile | work accepted for legacy entries)' };
   }
   if (typeof label !== 'string' || !label.trim()) {
     return { ok: false, error: 'label (non-empty string) is required' };
   }
   if (typeof value !== 'string' || value.length === 0) {
     return { ok: false, error: 'value (non-empty string) is required' };
+  }
+  if (tags !== undefined && (!Array.isArray(tags) || !tags.every((t) => typeof t === 'string'))) {
+    return { ok: false, error: 'tags must be an array of strings' };
+  }
+  if (dueDate !== undefined && dueDate !== null && typeof dueDate !== 'string') {
+    return { ok: false, error: 'dueDate must be a string (ISO date) if provided' };
   }
   if (!service.isUnlocked?.()) return { ok: false, locked: true };
   const list = await safeList(service);
@@ -62,12 +74,15 @@ export async function opUpsert(service, { id, kind, label, value, hint } = {}) {
     (e) => e.kind === kind && String(e.label ?? '').trim() === String(label).trim(),
   );
   if (!targetId && matched) targetId = matched.id;
+  const cleanTags = Array.isArray(tags) ? tags.map((t) => t.trim()).filter(Boolean) : undefined;
   const entry = {
     id: targetId,
     kind,
     label: label.trim(),
     value,
     ...(kind === 'credential' && hint ? { hint } : {}),
+    ...(cleanTags && cleanTags.length ? { tags: cleanTags } : {}),
+    ...(dueDate ? { dueDate } : {}),
   };
   try {
     await service.upsert(entry);
@@ -157,7 +172,7 @@ export async function opRemove(service, { id, label, confirmKind } = {}) {
  *   - { ok: false, locked: true }                                          on locked vault
  *   - { ok: false, error }                                                 on missing/empty label
  */
-const KIND_LABELS = { profile: '个人资料', work: '工作', credential: '凭证' };
+const KIND_LABELS = { note: '笔记', profile: '个人资料（旧）', work: '工作（旧）', credential: '凭证' };
 
 /**
  * Builds a Markdown export of the current vault snapshot.
@@ -170,7 +185,7 @@ const KIND_LABELS = { profile: '个人资料', work: '工作', credential: '凭�
 export async function opExportMarkdown(service) {
   if (!service.isUnlocked?.()) return { ok: false, locked: true };
   const list = await safeList(service);
-  const byKind = { profile: [], work: [], credential: [] };
+  const byKind = { note: [], profile: [], work: [], credential: [] };
   for (const e of list) {
     if (byKind[e.kind]) byKind[e.kind].push(e);
     else (byKind[e.kind] = byKind[e.kind] || []).push(e);
@@ -187,10 +202,14 @@ export async function opExportMarkdown(service) {
     if (!entries.length) continue;
     lines.push(`## ${KIND_LABELS[kind] || kind}`, '');
     for (const e of entries) {
+      const meta = [];
+      if (Array.isArray(e.tags) && e.tags.length) meta.push('标签: ' + e.tags.join(', '));
+      if (e.dueDate) meta.push('截止: ' + e.dueDate);
+      const metaStr = meta.length ? ` _(${meta.join(' | ')})_` : '';
       if (kind === 'credential') {
-        lines.push(`- **${e.label}**：🔒 已加密，内容未导出（如需查看请使用揭示功能）`);
+        lines.push(`- **${e.label}**：🔒 已加密，内容未导出（如需查看请使用揭示功能）${metaStr}`);
       } else {
-        lines.push(`- **${e.label}**：${e.value}`);
+        lines.push(`- **${e.label}**：${e.value}${metaStr}`);
       }
     }
     lines.push('');

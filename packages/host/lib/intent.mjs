@@ -355,7 +355,7 @@ export function parseIntent(cleanMessage) {
 
   // — upsert / save final —
   if (wantSave || wantChange || (label && value)) {
-    if (!kind && value) kind = 'profile';
+    if (!kind && value) kind = 'note';
     return { intent: 'upsert', kind, label: label || null, value: value || null, wantSave, wantChange };
   }
 

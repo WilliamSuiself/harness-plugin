@@ -271,25 +271,34 @@ export function apply(ctx) {
         '(because you need the id or current label). NEVER fabricate entries — if this returns ' +
         'empty then nothing is stored. Credential entries return value="<HIDDEN>" and never the ' +
         'real secret; to read a secret call memorypets_reveal_credential separately. ' +
-        'Use kind=profile for personal info (name/phone/email/address), kind=work for work context, ' +
-        'kind=credential for passwords/keys/tokens.',
+        'Use kind=note for everything non-secret (personal facts, work context, plans, family matters, ' +
+        'to-dos — tag it and/or set a dueDate to keep it organized), kind=credential for passwords/keys/tokens. ' +
+        '(kind=profile/work also match older entries saved before "note" existed.)',
       readOnly: true,
       parameters: {
         properties: {
           kind: {
             type: 'string',
-            enum: ['profile', 'work', 'credential'],
+            enum: ['note', 'profile', 'work', 'credential'],
             description: 'Optional filter. If omitted, returns entries of all kinds.',
+          },
+          tag: {
+            type: 'string',
+            description: 'Optional filter: only return entries whose tags[] include this exact tag.',
           },
         },
         required: [],
       },
-      async execute({ kind }) {
+      async execute({ kind, tag }) {
         const result = await opList(service, { kind });
         if (result.locked) {
           return needUnlockReply(
             'Tip: once unlocked, you can re-run memorypets_list_entries to read stored values.',
           );
+        }
+        if (result.ok && tag) {
+          const entries = result.entries.filter((e) => Array.isArray(e.tags) && e.tags.includes(tag));
+          return { ...result, count: entries.length, entries };
         }
         return result;
       },
@@ -306,8 +315,9 @@ export function apply(ctx) {
         'existing entry, the old entry is OVERWRITTEN in place (value updated, id preserved if passed in); ' +
         'otherwise a fresh entry is appended. BEFORE calling this tool on an UPDATE intent: call ' +
         'memorypets_list_entries first so you know the exact id/label you want to change. KIND MAPPING: ' +
-        '* profile ← user name / personal phone / email / home address / personal ID / birthday ' +
-        '* work    ← current project / company name / office address / work phone / manager / team ' +
+        '* note       ← anything non-secret: personal facts, work context, plans, to-dos, family matters. ' +
+        'Use the optional tags[] array to organize notes by topic (e.g. ["工作","计划"]) and dueDate for ' +
+        'anything with a deadline. ' +
         '* credential ← API keys / passwords / bearer tokens / secrets (value MUST be the raw secret; ' +
         'it will be encrypted at rest and NEVER shown to users unless memorypets_reveal_credential is called).',
       parameters: {
@@ -320,9 +330,10 @@ export function apply(ctx) {
           },
           kind: {
             type: 'string',
-            enum: ['profile', 'work', 'credential'],
+            enum: ['note', 'credential'],
             description:
-              'Entry category. profile = personal facts, work = ongoing work context, credential = secret.',
+              'Entry category. note = anything non-secret (personal / work / plans / family / to-dos), ' +
+              'credential = secret.',
           },
           label: {
             type: 'string',
@@ -334,7 +345,7 @@ export function apply(ctx) {
             type: 'string',
             description:
               'Raw value to store. For kind=credential this is the REAL SECRET (it is encrypted immediately). ' +
-              'For profile/work this is the plain text fact, e.g. the actual phone number string.',
+              'For kind=note this is the plain text content, e.g. the actual fact / plan / to-do text.',
           },
           hint: {
             type: 'string',
@@ -342,11 +353,24 @@ export function apply(ctx) {
               'Optional. Only used for credential entries. Short public hint shown next to the locked entry ' +
               'to help the user recognise the secret without revealing it. E.g. "personal, ends in 8a1f".',
           },
+          tags: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'Optional. Only used for kind=note. Free-form topic tags to help organize/filter notes later, ' +
+              'e.g. ["工作", "计划"]. No fixed vocabulary — use whatever words the user says.',
+          },
+          dueDate: {
+            type: 'string',
+            description:
+              'Optional. Only used for kind=note. An ISO date (YYYY-MM-DD) for notes that represent a plan / ' +
+              'to-do with a deadline.',
+          },
         },
         required: ['kind', 'label', 'value'],
       },
-      async execute({ id, kind, label, value, hint }) {
-        const result = await opUpsert(service, { id, kind, label, value, hint });
+      async execute({ id, kind, label, value, hint, tags, dueDate }) {
+        const result = await opUpsert(service, { id, kind, label, value, hint, tags, dueDate });
         if (result.locked) {
           return needUnlockReply(
             'Tip: unlock from the MemoryPets floating panel first, then I can save ' + label + '.',

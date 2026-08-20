@@ -12,11 +12,13 @@ const isEntry = (v) =>
   v &&
   typeof v === 'object' &&
   typeof v.id === 'string' &&
-  (v.kind === 'profile' || v.kind === 'work' || v.kind === 'credential') &&
+  (v.kind === 'note' || v.kind === 'profile' || v.kind === 'work' || v.kind === 'credential') &&
   typeof v.label === 'string' &&
   typeof v.value === 'string' &&
   typeof v.createdAt === 'number' &&
-  typeof v.updatedAt === 'number';
+  typeof v.updatedAt === 'number' &&
+  (v.tags === undefined || (Array.isArray(v.tags) && v.tags.every((t) => typeof t === 'string'))) &&
+  (v.dueDate === undefined || typeof v.dueDate === 'string');
 
 const isSnapshot = (v) =>
   v && typeof v === 'object' && v.version === 1 && Array.isArray(v.entries) && v.entries.every(isEntry);

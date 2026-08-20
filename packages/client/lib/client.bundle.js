@@ -59,7 +59,7 @@ window.__ModuleLoader__.load({
     
     const h = React.createElement;
     
-    const kindNames = { profile: '个人资料', work: '工作', credential: '凭证' };
+    const kindNames = { note: '笔记', profile: '个人资料（旧）', work: '工作（旧）', credential: '凭证' };
     
     function useAnimationFrame(stateKey) {
       const state = STATES[stateKey];
@@ -125,9 +125,11 @@ window.__ModuleLoader__.load({
       const [confirmPwd, setConfirmPwd] = React.useState('');
       const [error, setError] = React.useState(null);
       const [entries, setEntries] = React.useState([]);
-      const [formKind, setFormKind] = React.useState('profile');
+      const [formKind, setFormKind] = React.useState('note');
       const [formLabel, setFormLabel] = React.useState('');
       const [formValue, setFormValue] = React.useState('');
+      const [formTags, setFormTags] = React.useState('');
+      const [formDueDate, setFormDueDate] = React.useState('');
       const [adding, setAdding] = React.useState(false);
       const [gateOpen, setGateOpen] = React.useState(false);
       const [encryptionEnabled, setEncryptionEnabled] = React.useState(true);
@@ -331,10 +333,17 @@ window.__ModuleLoader__.load({
         if (!formLabel || !formValue) { setError('请填写标签和内容'); return; }
         if (adding) return;
         setAdding(true);
+        const tags = formTags.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean);
         fetch('/memorypets-api/upsert', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ kind: formKind, label: formLabel, value: formValue }),
+          body: JSON.stringify({
+            kind: formKind,
+            label: formLabel,
+            value: formValue,
+            ...(tags.length ? { tags } : {}),
+            ...(formDueDate ? { dueDate: formDueDate } : {}),
+          }),
         })
           .then((r) => r.json().then((d) => ({ status: r.status, data: d })))
           .then(({ status, data }) => {
@@ -342,6 +351,8 @@ window.__ModuleLoader__.load({
             if (Array.isArray(data.entries)) setEntries(data.entries);
             setFormLabel('');
             setFormValue('');
+            setFormTags('');
+            setFormDueDate('');
           })
           .catch((e) => setError(e.message || '添加失败'))
           .finally(() => setAdding(false));
@@ -494,6 +505,16 @@ window.__ModuleLoader__.load({
             { style: { fontSize: 13, color: '#111827', overflow: 'hidden', textOverflow: 'ellipsis' } },
             e.kind === 'credential' ? (e.hint ?? '••••••••') : e.value,
           ),
+          (Array.isArray(e.tags) && e.tags.length) || e.dueDate
+            ? h(
+                'div',
+                { style: { fontSize: 11, color: '#9ca3af', marginTop: 2 } },
+                [
+                  Array.isArray(e.tags) && e.tags.length ? '🏷️ ' + e.tags.join(', ') : null,
+                  e.dueDate ? '⏰ ' + e.dueDate : null,
+                ].filter(Boolean).join('  '),
+              )
+            : null,
         ),
         h(
           'button',
@@ -557,8 +578,7 @@ window.__ModuleLoader__.load({
                       value: formKind,
                       onChange: (ev) => setFormKind(ev.target.value),
                     },
-                    h('option', { value: 'profile' }, '个人资料'),
-                    h('option', { value: 'work' }, '工作'),
+                    h('option', { value: 'note' }, '笔记'),
                     h('option', { value: 'credential' }, '凭证'),
                   ),
                   h('input', {
@@ -574,6 +594,22 @@ window.__ModuleLoader__.load({
                     onChange: (ev) => setFormValue(ev.target.value),
                     type: formKind === 'credential' ? 'password' : 'text',
                   }),
+                  formKind === 'note' &&
+                    h(React.Fragment, null,
+                      h('input', {
+                        style: inputStyle,
+                        placeholder: '标签，用逗号分隔（例如：工作, 计划）',
+                        value: formTags,
+                        onChange: (ev) => setFormTags(ev.target.value),
+                      }),
+                      h('input', {
+                        style: inputStyle,
+                        type: 'date',
+                        placeholder: '截止日期（可选）',
+                        value: formDueDate,
+                        onChange: (ev) => setFormDueDate(ev.target.value),
+                      }),
+                    ),
                   h(
                     'button',
                     {

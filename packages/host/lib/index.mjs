@@ -1064,8 +1064,8 @@ export async function apply(ctx, config = {}) {
           if (method === 'POST' && endpoint === 'upsert') {
             const body = await readJsonBody(req, res);
             const kind = body?.kind;
-            if (!['profile', 'work', 'credential'].includes(kind)) {
-              jsonReply(res, 400, { error: 'kind must be profile | work | credential' });
+            if (!['note', 'profile', 'work', 'credential'].includes(kind)) {
+              jsonReply(res, 400, { error: 'kind must be note | credential (profile | work accepted for legacy entries)' });
               return;
             }
             if (typeof body?.label !== 'string' || !body.label.trim()) {
@@ -1074,12 +1074,18 @@ export async function apply(ctx, config = {}) {
             if (typeof body?.value !== 'string' || !body.value) {
               jsonReply(res, 400, { error: 'value is required' }); return;
             }
+            if (body?.tags !== undefined && (!Array.isArray(body.tags) || !body.tags.every((t) => typeof t === 'string'))) {
+              jsonReply(res, 400, { error: 'tags must be an array of strings' }); return;
+            }
+            const cleanTags = Array.isArray(body?.tags) ? body.tags.map((t) => String(t).trim()).filter(Boolean) : undefined;
             const entry = {
               id: body.id || undefined,
               kind,
               label: body.label,
               value: body.value,
               ...(body.hint ? { hint: body.hint } : {}),
+              ...(cleanTags && cleanTags.length ? { tags: cleanTags } : {}),
+              ...(body.dueDate ? { dueDate: body.dueDate } : {}),
             };
             await service.upsert(entry);
             const entries = await service.listEntries();
