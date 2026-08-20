@@ -22,3 +22,26 @@ _direct_apply_test.py
 .idea/
 .vscode/
 Thumbs.db
+*.iml
+*.ipr
+*.iws
+
+# === Android (Kotlin + Flutter android/ shells) ===
+**/.gradle/
+**/.kotlin/
+**/build/
+**/captures/
+**/.cxx/
+**/.externalNativeBuild/
+**/local.properties
+gradle-app.setting
+*.apk
+*.aab
+
+# === Flutter / Dart ===
+**/.dart_tool/
+**/.pub-cache/
+**/.pub/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/ios/Flutter/.last_build_id

@@ -64,33 +64,41 @@ class VaultBlobStoreImpl @Inject constructor(
         envelope: Envelope,
         newVersion: Long,
         updatedAtMs: Long
-    ) = store.edit { p ->
-        p[Keys.KDF_SALT] = envelope.kdf.salt
-        p[Keys.KDF_ITER] = envelope.kdf.iterations.toLong()
-        p[Keys.KDF_KEYLEN] = envelope.kdf.keyLen.toLong()
-        p[Keys.CT] = envelope.ciphertext
-        p[Keys.IV] = envelope.iv
-        p[Keys.VERSION] = newVersion
-        p[Keys.UPDATED_AT] = updatedAtMs
-        p[Keys.DIRTY] = false
+    ) {
+        store.edit { p ->
+            p[Keys.KDF_SALT] = envelope.kdf.salt
+            p[Keys.KDF_ITER] = envelope.kdf.iterations.toLong()
+            p[Keys.KDF_KEYLEN] = envelope.kdf.keyLen.toLong()
+            p[Keys.CT] = envelope.ciphertext
+            p[Keys.IV] = envelope.iv
+            p[Keys.VERSION] = newVersion
+            p[Keys.UPDATED_AT] = updatedAtMs
+            p[Keys.DIRTY] = false
+        }
     }
 
-    override suspend fun saveLocal(envelope: Envelope) = store.edit { p ->
-        p[Keys.KDF_SALT] = envelope.kdf.salt
-        p[Keys.KDF_ITER] = envelope.kdf.iterations.toLong()
-        p[Keys.KDF_KEYLEN] = envelope.kdf.keyLen.toLong()
-        p[Keys.CT] = envelope.ciphertext
-        p[Keys.IV] = envelope.iv
-        p[Keys.DIRTY] = true
+    override suspend fun saveLocal(envelope: Envelope) {
+        store.edit { p ->
+            p[Keys.KDF_SALT] = envelope.kdf.salt
+            p[Keys.KDF_ITER] = envelope.kdf.iterations.toLong()
+            p[Keys.KDF_KEYLEN] = envelope.kdf.keyLen.toLong()
+            p[Keys.CT] = envelope.ciphertext
+            p[Keys.IV] = envelope.iv
+            p[Keys.DIRTY] = true
+        }
     }
 
-    override suspend fun confirmVersion(newVersion: Long, updatedAtMs: Long) = store.edit { p ->
-        p[Keys.VERSION] = newVersion
-        p[Keys.UPDATED_AT] = updatedAtMs
-        p[Keys.DIRTY] = false
+    override suspend fun confirmVersion(newVersion: Long, updatedAtMs: Long) {
+        store.edit { p ->
+            p[Keys.VERSION] = newVersion
+            p[Keys.UPDATED_AT] = updatedAtMs
+            p[Keys.DIRTY] = false
+        }
     }
 
-    override suspend fun markDirty(dirty: Boolean) = store.edit { it[Keys.DIRTY] = dirty }
+    override suspend fun markDirty(dirty: Boolean) {
+        store.edit { it[Keys.DIRTY] = dirty }
+    }
 
     override suspend fun isDirty(): Boolean =
         store.data.map { it[Keys.DIRTY] ?: false }.let { flow ->

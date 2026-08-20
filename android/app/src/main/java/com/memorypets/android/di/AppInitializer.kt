@@ -3,6 +3,7 @@ package com.memorypets.android.di
 import android.app.Application
 import androidx.work.Configuration
 import androidx.work.WorkManager
+import com.memorypets.android.BuildConfig
 import dagger.hilt.android.qualifiers.ApplicationContext
 import timber.log.Timber
 import javax.inject.Inject
@@ -21,8 +22,8 @@ class AppInitializer @Inject constructor() : Configuration.Provider {
         WorkManager.initialize(app, workManagerConfiguration)
     }
 
-    override fun getWorkManagerConfiguration(): Configuration =
-        Configuration.Builder()
+    override val workManagerConfiguration: Configuration
+        get() = Configuration.Builder()
             .setMinimumLoggingLevel(if (BuildConfig.DEBUG) android.util.Log.DEBUG else android.util.Log.INFO)
             .build()
 }

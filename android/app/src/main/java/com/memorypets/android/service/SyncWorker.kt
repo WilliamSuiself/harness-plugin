@@ -14,7 +14,6 @@ import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import kotlinx.coroutines.flow.first
 import java.util.concurrent.TimeUnit
-import javax.inject.Inject
 
 /**
  * 后台周期同步 Worker（WorkManager，默认 15 分钟一次，最低频次）
@@ -45,8 +44,6 @@ class SyncWorker @AssistedInject constructor(
     companion object {
         private const val NAME = "memorypets_periodic_sync"
 
-        @Inject lateinit var wmProvider: WorkManagerProvider
-
         fun enqueuePeriodic(context: Context) {
             val req = PeriodicWorkRequestBuilder<SyncWorker>(
                 repeatInterval = 15,
@@ -60,5 +57,3 @@ class SyncWorker @AssistedInject constructor(
         }
     }
 }
-
-class WorkManagerProvider @Inject constructor()

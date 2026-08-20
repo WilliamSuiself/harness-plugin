@@ -11,6 +11,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -69,35 +70,42 @@ class AppPrefsImpl @Inject constructor(
         }
     }
 
-    override suspend fun setServerUrl(url: String) =
+    override suspend fun setServerUrl(url: String) {
         context.dataStore.edit { it[Keys.SERVER_URL] = url }
+    }
 
-    override suspend fun setCloudAccount(username: String, token: String) =
+    override suspend fun setCloudAccount(username: String, token: String) {
         context.dataStore.edit {
             it[Keys.USERNAME] = username
             it[Keys.SESSION_TOKEN] = token
         }
+    }
 
-    override suspend fun clearCloudAccount() =
+    override suspend fun clearCloudAccount() {
         context.dataStore.edit {
             it.remove(Keys.USERNAME)
             it.remove(Keys.SESSION_TOKEN)
         }
+    }
 
-    override suspend fun setDarkMode(enabled: Boolean) =
+    override suspend fun setDarkMode(enabled: Boolean) {
         context.dataStore.edit { it[Keys.DARK_MODE] = enabled }
+    }
 
-    override suspend fun setCodewordGateEnabled(enabled: Boolean) =
+    override suspend fun setCodewordGateEnabled(enabled: Boolean) {
         context.dataStore.edit { it[Keys.CG_ENABLED] = enabled }
+    }
 
-    override suspend fun setCodewords(words: List<String>) =
+    override suspend fun setCodewords(words: List<String>) {
         context.dataStore.edit { it[Keys.CODEWORDS] = words.toSet() }
+    }
 
-    override suspend fun markSynced(version: Long, atMs: Long) =
+    override suspend fun markSynced(version: Long, atMs: Long) {
         context.dataStore.edit {
             it[Keys.LAST_SYNC_VER] = version
             it[Keys.LAST_SYNC_AT] = atMs
         }
+    }
 
     suspend fun firstRunEnsureDeviceId(): String {
         val current = deviceId.first()

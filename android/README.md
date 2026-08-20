@@ -50,17 +50,82 @@ KAT 测试会打印 ciphertext base64，请**拿同样的 salt/iv/plaintext/iter
 
 ### 2.1 Gradle Wrapper
 
-仓库未提交 `gradlew`、`gradlew.bat`、`gradle/wrapper/gradle-wrapper.jar`
-（因二进制体积 + 每次版本更新要重新提交）。
-第一次打开前在 `android/` 目录里：
+> ⚠️ **🔴 致命坑 1：本仓库必须使用 Gradle 8.9，绝对不能用 Gradle 9.x！**
+> Hilt 2.51.1 / AGP 8.5.x / Kotlin 2.0.0 最高只兼容 Gradle 8.x；
+> Gradle 9.x 里 `Configuration.fileCollection(Spec)` API 已移除，会报：
+> ```
+> NoSuchMethodError: 'FileCollection Configuration.fileCollection(Spec)'
+> ```
+>
+> ⚠️ **🟠 致命坑 2：如果你系统里 `brew install gradle` 过 Gradle 9.x，`gradle wrapper …` 这条命令本身就是用 Gradle 9.x 执行的！**
+> 所以必须**先卸载系统 Gradle 9.x**，或者在 wrapper 生成时显式跳过系统 gradle，按下面的步骤严格执行。
+
+本仓库的 Gradle 版本**写死在 `gradle/wrapper/gradle-wrapper.properties`** 里（已提交），`distributionUrl=https://services.gradle.org/distributions/gradle-8.9-bin.zip`。
+
+**你需要做的（按顺序，任何一步错都会回到 Gradle 9.3）：**
 
 ```bash
-# macOS / Linux
-gradle wrapper --gradle-version 8.9
-# 或若系统没装 gradle，直接打开 Android Studio 它会帮你生成 wrapper
+# -----------------------------------------------------------------------------
+# Step 0. 先清理所有脏缓存（刚才跑 Gradle 9.3 生成的脏东西）
+# -----------------------------------------------------------------------------
+cd android
+rm -rf .gradle build ~/.gradle/caches/build-cache-*  \
+        ~/.gradle/daemon/9.3 ~/.gradle/caches/9.3   \
+        ~/.gradle/wrapper/dists/gradle-9.3*
+
+# -----------------------------------------------------------------------------
+# Step 1. 检查系统 gradle 版本：如果是 9.x，必须先卸载！
+# -----------------------------------------------------------------------------
+gradle --version 2>&1 | head -n 3
+# 👉 如果显示 Gradle 9.x：
+#    macOS Homebrew:  brew uninstall gradle
+#    macOS MacPorts:  sudo port uninstall gradle
+#    SDKMAN:          sdk uninstall gradle 9.3
+#    Scoop:           scoop uninstall gradle
+# 👉 如果显示 command not found — 这是最佳状态！说明 PATH 里没有 gradle，wrapper 不会被污染。
+
+# -----------------------------------------------------------------------------
+# Step 2. 生成 wrapper（只有 3 种方式，选其中任意一种）
+# -----------------------------------------------------------------------------
+#
+# ⚪️ 方式 A（最推荐）：只用 Android Studio 生成 wrapper，完全绕过命令行
+#   1. Android Studio → 打开 harness-plugin/android 目录
+#   2. 右上角弹出 "Gradle JDK location is invalid" → 让它 Fix → 用 jbr（JDK 17）
+#   3. Gradle Sync 失败后会弹出对话框 → 选 "Generate Gradle Wrapper / Upgrade Gradle"
+#   4. 版本填 8.9，distribution-type 选 bin → OK
+#
+# 🟢 方式 B：用 Android Studio 自带的 jbr + 官方 gradle-wrapper.jar（无需系统 gradle）
+#   1. 在 Android Studio 里打开本工程，确保 Gradle JDK 是
+#      `/Applications/Android Studio.app/Contents/jbr/Contents/Home`
+#   2. 顶部菜单 Tools → SDK Manager → SDK Tools → 打勾 "Android SDK Command-line Tools (latest)"
+#   3. 新开 Terminal 面板（⚠️ 不是你本机 iTerm！是 Android Studio 底部的 Terminal）
+#   4. 执行下面 2 行：
+curl -sL -o /tmp/gradle-wrapper.jar \
+    'https://raw.githubusercontent.com/gradle/gradle/v8.9.0/gradle/wrapper/gradle-wrapper.jar'
+java -cp /tmp/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain --version
+#   5. 这一步会自动生成 gradlew + gradlew.bat + gradle/wrapper/gradle-wrapper.jar
+#
+# 🔵 方式 C：如果你能安装 8.x gradle 覆盖 9.x（SDKMAN 推荐）
+#   1. curl -s "https://get.sdkman.io" | bash  # 没装 SDKMAN 的话
+#   2. source "$HOME/.sdkman/bin/sdkman-init.sh"
+#   3. sdk install gradle 8.9 && sdk use gradle 8.9 && sdk default gradle 8.9
+#   4. cd android && gradle wrapper --gradle-version 8.9 --distribution-type bin
+
+# -----------------------------------------------------------------------------
+# Step 3. 验证 —— 输出 "Gradle 8.9" 才对，其它数字都是错的
+# -----------------------------------------------------------------------------
+./gradlew --version 2>&1 | head -n 10
 ```
 
-然后 AS 里 `File > Sync Project with Gradle Files` 即可。
+**以后任何 Gradle 命令都用 `./gradlew …`（带斜杠！），不要用 `gradle …`**。
+
+---
+
+> 💡 **Kotlin 2.0 Compose Compiler 强制要求**：
+> 我们在 `app/build.gradle.kts` 里启用了 Kotlin 官方 **`org.jetbrains.kotlin.plugin.compose`** 插件（别名 `kotlin-compose`），
+> 这是 Kotlin 2.0 启用 Compose 的唯一正确方式，老的 `composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }` 已在 Kotlin 2.0 里废弃。
+> 如果看到：*"Starting in Kotlin 2.0, the Compose Compiler Gradle plugin is required when compose is enabled"*，
+> 就是你用的模板文件太老了，重新 git pull 最新 `app/build.gradle.kts`。
 
 ---
 

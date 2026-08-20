@@ -1,0 +1,20 @@
+# Gradle build artifacts
+.gradle/
+build/
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+app/release/
+app/build/
+
+# Wrapper：只忽略二进制可执行文件，gradle-wrapper.properties（版本锁）必须提交进仓库
+gradlew
+gradlew.bat
+gradle/wrapper/gradle-wrapper.jar
+!gradle/wrapper/gradle-wrapper.properties
+
+# IDE
+.idea/
+*.iml
+.DS_Store

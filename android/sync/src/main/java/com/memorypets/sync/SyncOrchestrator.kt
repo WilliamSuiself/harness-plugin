@@ -114,13 +114,13 @@ class SyncOrchestrator @Inject constructor(
             // 409 -> retry once
             if (firstPut is SyncOutcome.ConflictNeedManual) {
                 val theirVersion = firstPut.theirVersion
-                val theirEnv = fetchCurrentEnvAfter409(bearer)
+                val theirEnvDto = fetchCurrentEnvAfter409(bearer)?.envelope
                     ?: return SyncOutcome.NetworkError(RuntimeException("failed to refetch winner after 409"))
                 if (masterPassword != null) {
                     try {
-                        VaultCrypto.unlock(theirEnv.toDomain(), masterPassword)
+                        VaultCrypto.unlock(theirEnvDto.toDomain(), masterPassword)
                         blobStore.overwriteWithRemote(
-                            theirEnv.toDomain(), theirVersion, System.currentTimeMillis()
+                            theirEnvDto.toDomain(), theirVersion, System.currentTimeMillis()
                         )
                     } catch (_: AEADBadTagException) {
                         return SyncOutcome.DecryptFailed("different master password on 409 winner")

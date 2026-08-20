@@ -6,6 +6,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -67,11 +69,11 @@ fun EditorScreen(
             var kind by rememberSaveable(stateSaver = EntryKindSaver) {
                 mutableStateOf(state.kind)
             }
-            var label by rememberSaveable(state.value.label) { mutableStateOf(state.value.label) }
-            var value by rememberSaveable(state.value.value) { mutableStateOf(state.value.value) }
-            var tagsStr by rememberSaveable(state.value.tagsStr) { mutableStateOf(state.value.tagsStr) }
-            var due by rememberSaveable(state.value.due) { mutableStateOf(state.value.due) }
-            var hint by rememberSaveable(state.value.hint) { mutableStateOf(state.value.hint) }
+            var label by rememberSaveable(state.label) { mutableStateOf(state.label) }
+            var value by rememberSaveable(state.value) { mutableStateOf(state.value) }
+            var tagsStr by rememberSaveable(state.tagsStr) { mutableStateOf(state.tagsStr) }
+            var due by rememberSaveable(state.due) { mutableStateOf(state.due) }
+            var hint by rememberSaveable(state.hint) { mutableStateOf(state.hint) }
             var revealValue by rememberSaveable { mutableStateOf(false) }
 
             Text("类型", style = MaterialTheme.typography.labelLarge)
