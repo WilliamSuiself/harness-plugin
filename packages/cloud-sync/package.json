@@ -1,0 +1,15 @@
+{
+  "name": "@memorypets/cloud-sync",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Zero-knowledge sync relay for MemoryPets: stores only encrypted vault envelopes, never plaintext or the master password.",
+  "main": "lib/server.mjs",
+  "scripts": {
+    "start": "node bin/start.mjs",
+    "test": "node --test 'test/*.test.mjs'"
+  },
+  "engines": {
+    "node": ">=22.19"
+  }
+}

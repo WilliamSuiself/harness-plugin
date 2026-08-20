@@ -117,6 +117,13 @@ function ShellOverlayComponent() {
   const [showEnableEncryption, setShowEnableEncryption] = React.useState(false);
   const [enableEncPwd, setEnableEncPwd] = React.useState('');
   const [enableEncPwd2, setEnableEncPwd2] = React.useState('');
+  const [showCloudSync, setShowCloudSync] = React.useState(false);
+  const [cloudStatus, setCloudStatus] = React.useState({ loggedIn: false });
+  const [cloudServerUrl, setCloudServerUrl] = React.useState('');
+  const [cloudUsername, setCloudUsername] = React.useState('');
+  const [cloudPassword, setCloudPassword] = React.useState('');
+  const [cloudSyncing, setCloudSyncing] = React.useState(false);
+  const [cloudMessage, setCloudMessage] = React.useState(null);
   const imgSrc = useAnimationFrame(stateKey);
   useCodeWordDetector(codeWords);
 
@@ -154,6 +161,10 @@ function ShellOverlayComponent() {
         if (typeof data.encryptionEnabled === 'boolean') setEncryptionEnabled(data.encryptionEnabled);
         if (typeof data.codewordGateEnabled === 'boolean') setCodewordGateEnabled(data.codewordGateEnabled);
       })
+      .catch(() => {});
+    fetch('/memorypets-api/cloud/status')
+      .then((r) => r.json())
+      .then((data) => { if (data.ok) setCloudStatus(data); })
       .catch(() => {});
   }, []);
 
@@ -306,6 +317,67 @@ function ShellOverlayComponent() {
         URL.revokeObjectURL(url);
       })
       .catch((e) => setError(e.message || '导出失败'));
+  };
+
+  const handleCloudRegister = () => {
+    setCloudMessage(null);
+    if (!cloudServerUrl || !cloudUsername || !cloudPassword) { setCloudMessage('请填写服务器地址、账号和密码'); return; }
+    fetch('/memorypets-api/cloud/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ serverUrl: cloudServerUrl, username: cloudUsername, password: cloudPassword }),
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (!data.ok) throw new Error(data.error || '注册失败');
+        setCloudStatus({ ok: true, loggedIn: true, username: cloudUsername, serverUrl: cloudServerUrl });
+        setCloudPassword('');
+        setCloudMessage('注册成功，已登录。');
+      })
+      .catch((e) => setCloudMessage(e.message || '注册失败'));
+  };
+
+  const handleCloudLogin = () => {
+    setCloudMessage(null);
+    if (!cloudServerUrl || !cloudUsername || !cloudPassword) { setCloudMessage('请填写服务器地址、账号和密码'); return; }
+    fetch('/memorypets-api/cloud/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ serverUrl: cloudServerUrl, username: cloudUsername, password: cloudPassword }),
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (!data.ok) throw new Error(data.error || '登录失败');
+        setCloudStatus({ ok: true, loggedIn: true, username: cloudUsername, serverUrl: cloudServerUrl });
+        setCloudPassword('');
+        setCloudMessage('登录成功。');
+      })
+      .catch((e) => setCloudMessage(e.message || '登录失败'));
+  };
+
+  const handleCloudLogout = () => {
+    setCloudMessage(null);
+    fetch('/memorypets-api/cloud/logout', { method: 'POST' })
+      .then(() => {
+        setCloudStatus({ loggedIn: false });
+        setCloudMessage('已退出云同步账号。');
+      })
+      .catch(() => {});
+  };
+
+  const handleCloudSync = () => {
+    setCloudMessage(null);
+    if (cloudSyncing) return;
+    setCloudSyncing(true);
+    fetch('/memorypets-api/cloud/sync', { method: 'POST' })
+      .then((r) => r.json())
+      .then((data) => {
+        if (!data.ok) throw new Error(data.error || '同步失败');
+        if (data.action === 'pulled' && Array.isArray(data.entries)) setEntries(data.entries);
+        setCloudMessage(data.action === 'pulled' ? '已从云端拉取最新记忆（云端版本更新）。' : '已上传到云端。');
+      })
+      .catch((e) => setCloudMessage(e.message || '同步失败'))
+      .finally(() => setCloudSyncing(false));
   };
 
   const handleAdd = () => {
@@ -688,6 +760,58 @@ return h(
                       onChange: (ev) => setEnableEncPwd2(ev.target.value),
                     }),
                     h('button', { style: btnStyle, onClick: handleEnableEncryption }, '启用加密'),
+                  ),
+              ),
+              h(
+                'div',
+                { style: { borderTop: '1px solid rgba(0,0,0,0.06)', paddingTop: 8, marginTop: 8 } },
+                h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 } },
+                  h('div', { style: { fontWeight: 600, fontSize: 12 } }, '云同步'),
+                  h('button', { style: btnGhost, onClick: () => setShowCloudSync((v) => !v) }, showCloudSync ? '收起' : '展开'),
+                ),
+                showCloudSync &&
+                  h(React.Fragment, null,
+                    h('div', { style: { color: '#6b7280', fontSize: 11, marginBottom: 6 } },
+                      '云端只存储加密后的密文，绝不接触主密码或明文内容。云账号密码与主密码是两个独立的密钥，可用于在手机 App 上登录同一账号做多端同步。'),
+                    cloudStatus.loggedIn
+                      ? h(React.Fragment, null,
+                          h('div', { style: { fontSize: 12, color: '#111827', marginBottom: 6 } },
+                            `已登录：${cloudStatus.username || ''} @ ${cloudStatus.serverUrl || ''}`),
+                          h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+                            h('button', {
+                              style: { ...btnStyle, opacity: cloudSyncing ? 0.6 : 1, cursor: cloudSyncing ? 'wait' : 'pointer' },
+                              onClick: handleCloudSync,
+                              disabled: cloudSyncing,
+                            }, cloudSyncing ? '同步中…' : '立即同步'),
+                            h('button', { style: btnGhost, onClick: handleCloudLogout }, '退出云账号'),
+                          ),
+                        )
+                      : h(React.Fragment, null,
+                          h('input', {
+                            style: inputStyle,
+                            placeholder: '同步服务器地址，例如 https://sync.example.com',
+                            value: cloudServerUrl,
+                            onChange: (ev) => setCloudServerUrl(ev.target.value),
+                          }),
+                          h('input', {
+                            style: inputStyle,
+                            placeholder: '云账号（3-64位字母/数字/._@-）',
+                            value: cloudUsername,
+                            onChange: (ev) => setCloudUsername(ev.target.value),
+                          }),
+                          h('input', {
+                            style: inputStyle,
+                            type: 'password',
+                            placeholder: '云账号密码（至少8个字符，与主密码不同）',
+                            value: cloudPassword,
+                            onChange: (ev) => setCloudPassword(ev.target.value),
+                          }),
+                          h('div', { style: { display: 'flex', gap: 6 } },
+                            h('button', { style: btnStyle, onClick: handleCloudLogin }, '登录'),
+                            h('button', { style: btnGhost, onClick: handleCloudRegister }, '注册新账号'),
+                          ),
+                        ),
+                    cloudMessage && h('div', { style: { fontSize: 11, color: '#6b7280', marginTop: 6 } }, cloudMessage),
                   ),
               ),
             ),

@@ -7,7 +7,7 @@
   "scripts": {
     "build": "pnpm run build:client",
     "build:client": "node scripts/build-client.mjs",
-    "test": "node --test 'packages/host/test/*.test.mjs'",
+    "test": "node --test 'packages/host/test/*.test.mjs' 'packages/cloud-sync/test/*.test.mjs'",
     "reset-vault": "node scripts/reset-vault.mjs",
     "restart-dsh": "bash scripts/restart-dsh.sh",
     "lint": "echo 'no lint configured yet'"

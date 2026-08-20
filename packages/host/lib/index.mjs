@@ -11,6 +11,7 @@ import { opStatus, opList, opUpsert, opRemove, opReveal, opExportMarkdown, safeL
 import { makeCodeWordDetector, parseIntent } from './intent.mjs';
 import { buildOverridePrompt } from './override-prompt.mjs';
 import { installCodeWordGate } from './codeword-gate.mjs';
+import { createCloudSyncClient } from './cloud-sync.mjs';
 import { codewordsPath, settingsPath, notesPath, envelopePath } from './paths.mjs';
 import { registerAssetsRoute, resolveAssetsRoot } from './routes/assets-route.mjs';
 import { registerClientBundle } from './client-modules-registration.mjs';
@@ -129,6 +130,54 @@ export async function apply(ctx, config = {}) {
     if (master === null) return;
     const env = await vault.sealWith(master);
     await config.saveEnvelope(env);
+  };
+
+  // Cloud sync client — talks to the packages/cloud-sync relay. It never
+  // sees the master password; it only pushes/pulls the same opaque envelope
+  // that's already persisted to disk locally (see persist() above).
+  const cloudSync = createCloudSyncClient();
+
+  // Push-then-pull-on-conflict: try to upload the local encrypted envelope;
+  // if the relay reports someone else already pushed a newer version, pull
+  // that version instead and adopt it locally (after verifying it decrypts
+  // with our own master password — never blindly trust a raw blob).
+  const cloudSyncNow = async () => {
+    if (!settings.encryptionEnabled) {
+      return { ok: false, error: 'Cloud sync requires encryption to be enabled (plaintext mode is not synced).' };
+    }
+    if (!vault.isUnlocked() || master === null) {
+      return { ok: false, error: 'Vault must be unlocked to sync.' };
+    }
+    const localEnvelope = await service.loadEnvelope();
+    if (!localEnvelope) {
+      return { ok: false, error: 'Nothing to sync yet — save at least one entry first.' };
+    }
+    const pushResult = await cloudSync.push(localEnvelope);
+    if (pushResult.ok) {
+      return { ok: true, action: 'pushed', version: pushResult.version };
+    }
+    if (!pushResult.conflict) {
+      return { ok: false, error: pushResult.error || 'push failed' };
+    }
+    // Someone else's write won the race — pull it down and adopt it.
+    const pullResult = await cloudSync.pull();
+    if (!pullResult.ok) {
+      return { ok: false, error: pullResult.error || 'pull failed after conflict' };
+    }
+    if (!pullResult.envelope) {
+      return { ok: false, error: 'Conflict reported but the relay has no envelope to pull.' };
+    }
+    const remoteVault = new Vault();
+    try {
+      await remoteVault.unlock(pullResult.envelope, master);
+    } catch {
+      return { ok: false, error: 'Cloud has a newer version, but it does not decrypt with your current master password.' };
+    }
+    vault = remoteVault;
+    await service.saveEnvelope(pullResult.envelope);
+    await cloudSync.confirmVersion(pullResult.version);
+    refreshSystemPrompt();
+    return { ok: true, action: 'pulled', version: pullResult.version, entries: vault.list() };
   };
 
   const buildProfilePrompt = () => {
@@ -981,9 +1030,52 @@ export async function apply(ctx, config = {}) {
             }
           }
 
+          // —— POST /memorypets-api/cloud/register   {serverUrl, username, password}
+          if (method === 'POST' && endpoint === 'cloud/register') {
+            const body = await readJsonBody(req, res);
+            const r = await cloudSync.register(body?.serverUrl, body?.username, body?.password);
+            jsonReply(res, r.ok ? 200 : 400, r);
+            return;
+          }
+
+          // —— POST /memorypets-api/cloud/login   {serverUrl, username, password}
+          if (method === 'POST' && endpoint === 'cloud/login') {
+            const body = await readJsonBody(req, res);
+            const r = await cloudSync.login(body?.serverUrl, body?.username, body?.password);
+            jsonReply(res, r.ok ? 200 : 400, r);
+            return;
+          }
+
+          // —— POST /memorypets-api/cloud/logout
+          if (method === 'POST' && endpoint === 'cloud/logout') {
+            const r = await cloudSync.logout();
+            jsonReply(res, 200, r);
+            return;
+          }
+
+          // —— GET /memorypets-api/cloud/status
+          // Never contains the session token — safe to read even while the
+          // vault is locked.
+          if (method === 'GET' && endpoint === 'cloud/status') {
+            const status = await cloudSync.getStatus();
+            jsonReply(res, 200, { ok: true, ...status });
+            return;
+          }
+
           // —— 之后所有 endpoint 都需要 vault 已解锁
           if (!service.isUnlocked()) {
             jsonReply(res, 401, { error: 'Vault is locked. Unlock first.' });
+            return;
+          }
+
+          // —— POST /memorypets-api/cloud/sync
+          // Push local encrypted envelope to the cloud relay; on a version
+          // conflict (another device pushed first), pull and adopt the
+          // remote envelope instead (after verifying it decrypts with the
+          // current master password). Requires an unlocked vault.
+          if (method === 'POST' && endpoint === 'cloud/sync') {
+            const r = await cloudSyncNow();
+            jsonReply(res, r.ok ? 200 : 400, r);
             return;
           }
 

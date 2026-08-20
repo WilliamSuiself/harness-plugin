@@ -43,6 +43,7 @@ export const ENVELOPE_FILENAME = 'memorypets.envelope.json';
 export const CODEWORDS_FILENAME = 'memorypets.codewords.json';
 export const SETTINGS_FILENAME = 'memorypets.settings.json';
 export const NOTES_FILENAME = 'memorypets.notes.json';
+export const CLOUD_CONFIG_FILENAME = 'memorypets.cloud.json';
 
 export function envelopePath() {
   return join(resolveDshHome(), ENVELOPE_FILENAME);
@@ -62,6 +63,14 @@ export function settingsPath() {
 // encryption via settings. Never written to while encryption is enabled.
 export function notesPath() {
   return join(resolveDshHome(), NOTES_FILENAME);
+}
+
+// Cloud-sync account config: { serverUrl, username, token, lastKnownVersion,
+// deviceId }. Contains a SESSION TOKEN (bearer credential for the sync
+// relay account), never the vault master password and never the vault
+// plaintext — safe to read even while the vault is locked.
+export function cloudConfigPath() {
+  return join(resolveDshHome(), CLOUD_CONFIG_FILENAME);
 }
 
 export { legacyDshHome };
