@@ -30,6 +30,12 @@ class SyncDecryptFailed extends SyncOutcome {
   const SyncDecryptFailed(this.reason);
 }
 
+/// Settings 里尚未填"云密码"，无法 seal / unseal envelope。
+/// UI 应引导用户去 Settings 填好再回来重试。
+class SyncMissingCloudPassword extends SyncOutcome {
+  const SyncMissingCloudPassword();
+}
+
 class SyncNetworkError extends SyncOutcome {
   final Object error;
   const SyncNetworkError(this.error);
@@ -46,10 +52,12 @@ String describeSyncOutcome(SyncOutcome outcome) {
       return '⚠️ 冲突，需要手动合并';
     case SyncAuthExpired(reason: final reason):
       return reason == 'not logged in'
-          ? '� 尚未登录云账号（当前为纯本地模式），可在设置里配置云同步'
-          : '�🔐 云会话已过期，请在设置里重新登录';
+          ? '💡 尚未登录云账号（当前为纯本地模式），可在设置里配置云同步'
+          : '🔐 云会话已过期，请在设置里重新登录';
     case SyncDecryptFailed():
       return '❌ 对端主密码不同';
+    case SyncMissingCloudPassword():
+      return '💡 请在设置里填好"云密码"再同步';
     case SyncNetworkError(error: final e):
       return '🌐 网络错误：$e';
   }

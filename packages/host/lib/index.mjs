@@ -137,10 +137,15 @@ export async function apply(ctx, config = {}) {
   // that's already persisted to disk locally (see persist() above).
   const cloudSync = createCloudSyncClient();
 
-  // Push-then-pull-on-conflict: try to upload the local encrypted envelope;
+  // Push-then-merge-on-conflict: try to upload the local encrypted envelope;
   // if the relay reports someone else already pushed a newer version, pull
-  // that version instead and adopt it locally (after verifying it decrypts
-  // with our own master password — never blindly trust a raw blob).
+  // that version down, MERGE it entry-by-entry into the local vault (see
+  // `Vault#mergeSnapshot`), and push the merged result back.
+  //
+  // IMPORTANT: earlier versions of this function adopted the remote
+  // envelope wholesale on conflict (`vault = remoteVault`) — that silently
+  // discarded any local edit that hadn't been pushed yet (root cause of
+  // "web 端更新后内容被手机端整体覆盖"). Never do that again; always merge.
   const cloudSyncNow = async () => {
     if (!settings.encryptionEnabled) {
       return { ok: false, error: 'Cloud sync requires encryption to be enabled (plaintext mode is not synced).' };
@@ -159,7 +164,8 @@ export async function apply(ctx, config = {}) {
     if (!pushResult.conflict) {
       return { ok: false, error: pushResult.error || 'push failed' };
     }
-    // Someone else's write won the race — pull it down and adopt it.
+    // Someone else's write won the race — pull it down, merge (never
+    // overwrite), then push the merged snapshot so both devices converge.
     const pullResult = await cloudSync.pull();
     if (!pullResult.ok) {
       return { ok: false, error: pullResult.error || 'pull failed after conflict' };
@@ -173,11 +179,33 @@ export async function apply(ctx, config = {}) {
     } catch {
       return { ok: false, error: 'Cloud has a newer version, but it does not decrypt with your current master password.' };
     }
-    vault = remoteVault;
-    await service.saveEnvelope(pullResult.envelope);
+    vault.mergeSnapshot(remoteVault.snapshot);
+    await persist();
     await cloudSync.confirmVersion(pullResult.version);
     refreshSystemPrompt();
-    return { ok: true, action: 'pulled', version: pullResult.version, entries: vault.list() };
+    const mergedEnvelope = await service.loadEnvelope();
+    const retryPush = await cloudSync.push(mergedEnvelope);
+    if (!retryPush.ok && !retryPush.conflict) {
+      // Merged locally and persisted to disk either way — just report that
+      // the upload itself still needs a retry (e.g. another device raced
+      // us again in the meantime).
+      return {
+        ok: true,
+        action: 'merged',
+        uploaded: false,
+        uploadError: retryPush.error,
+        entries: vault.list(),
+        categories: vault.listCategories(),
+      };
+    }
+    return {
+      ok: true,
+      action: 'merged',
+      uploaded: !!retryPush.ok,
+      version: retryPush.version ?? pullResult.version,
+      entries: vault.list(),
+      categories: vault.listCategories(),
+    };
   };
 
   const buildProfilePrompt = () => {
@@ -300,6 +328,24 @@ export async function apply(ctx, config = {}) {
     list() {
       return vault.list();
     },
+    // Category catalog powering the notebook sidebar (工作/生活/学习/个人 +
+    // whatever the user adds). Lives inside the encrypted snapshot so it
+    // rides along on save/unlock/cloud-sync automatically.
+    listCategories() {
+      return vault.isUnlocked() ? vault.listCategories() : [];
+    },
+    async addCategory(name) {
+      if (!vault.isUnlocked()) throw new Error('Vault is locked.');
+      const categories = vault.addCategory(name);
+      await persist();
+      return categories;
+    },
+    async removeCategory(name) {
+      if (!vault.isUnlocked()) throw new Error('Vault is locked.');
+      const categories = vault.removeCategory(name);
+      await persist();
+      return categories;
+    },
     async upsert(entry, masterPassword) {
       if (!vault.isUnlocked()) {
         master = masterPassword;
@@ -308,12 +354,15 @@ export async function apply(ctx, config = {}) {
       } else if (master === null) {
         master = masterPassword;
       }
-      vault.upsert({
-        ...entry,
-        id: entry.id || `${entry.kind}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
-      });
+      const id = entry.id || `${entry.kind}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+      vault.upsert({ ...entry, id });
       await persist();
       refreshSystemPrompt();
+      // Returned so HTTP/tool callers can find the entry they just created
+      // without having to diff the full entries list (e.g. the web UI's
+      // "quick add: title only" flow needs this id to immediately re-open
+      // the entry for editing so the user can fill in the content).
+      return id;
     },
     async remove(id, masterPassword) {
       if (!vault.isUnlocked() && masterPassword) {
@@ -461,12 +510,13 @@ export async function apply(ctx, config = {}) {
           // encrypted → plaintext
           if (!vault.isUnlocked()) throw new Error('Vault must be unlocked to disable encryption.');
           const entries = vault.list();
+          const categories = vault.listCategories();
           const plain = new PlainStore();
-          await plain.unlock({ version: 1, entries });
+          await plain.unlock({ version: 1, entries, categories });
           const path = await import('node:path');
           const file = notesPath();
           await fs.mkdir(path.dirname(file), { recursive: true });
-          await fs.writeFile(file, JSON.stringify({ version: 1, entries }, null, 2));
+          await fs.writeFile(file, JSON.stringify({ version: 1, entries, categories }, null, 2));
           try { await fs.unlink(envelopePath()); } catch {}
           vault = plain;
           master = null;
@@ -476,9 +526,11 @@ export async function apply(ctx, config = {}) {
             throw new Error('A master password (at least 6 characters) is required to enable encryption.');
           }
           const entries = vault.isUnlocked() ? vault.list() : [];
+          const categories = vault.isUnlocked() ? vault.listCategories() : undefined;
           const fresh = new Vault();
           await fresh.unlock(null, partial.password);
           for (const e of entries) fresh.upsert(e);
+          if (categories) for (const c of categories) fresh.addCategory(c);
           const env = await fresh.sealWith(partial.password);
           await fs.writeFile(envelopePath(), JSON.stringify(env, null, 2));
           try { await fs.unlink(notesPath()); } catch {}
@@ -918,7 +970,39 @@ export async function apply(ctx, config = {}) {
           // —— GET /memorypets-api/entries
           if (method === 'GET' && endpoint === 'entries') {
             const list = service.isUnlocked() ? await service.listEntries() : [];
-            jsonReply(res, 200, { entries: list, isUnlocked: !!service.isUnlocked() });
+            const categories = service.listCategories();
+            jsonReply(res, 200, { entries: list, categories, isUnlocked: !!service.isUnlocked() });
+            return;
+          }
+
+          // —— GET /memorypets-api/categories
+          // —— POST /memorypets-api/categories            {name}   → add
+          // —— POST /memorypets-api/categories/remove      {name}   → remove
+          // Categories live inside the encrypted snapshot (see vault.mjs),
+          // so GET only returns real data once the vault is unlocked.
+          if (endpoint === 'categories' || endpoint === 'categories/remove') {
+            if (method === 'GET' && endpoint === 'categories') {
+              jsonReply(res, 200, { ok: true, categories: service.listCategories() });
+              return;
+            }
+            if (method === 'POST') {
+              const body = await readJsonBody(req, res);
+              const name = body?.name;
+              if (typeof name !== 'string' || !name.trim()) {
+                jsonReply(res, 400, { error: 'name (non-empty string) is required' }); return;
+              }
+              try {
+                const categories = endpoint === 'categories/remove'
+                  ? await service.removeCategory(name)
+                  : await service.addCategory(name);
+                jsonReply(res, 200, { ok: true, categories });
+                return;
+              } catch (err) {
+                jsonReply(res, err?.message === 'Vault is locked.' ? 401 : 500, { error: err?.message || 'Failed to update categories' });
+                return;
+              }
+            }
+            jsonReply(res, 405, { error: 'method not allowed' });
             return;
           }
 
@@ -930,8 +1014,9 @@ export async function apply(ctx, config = {}) {
             try {
               await service.unlock(pw);
               const entries = await service.listEntries();
+              const categories = service.listCategories();
               const prompt = await service.buildProfilePrompt();
-              jsonReply(res, 200, { ok: true, isUnlocked: true, entries, prompt });
+              jsonReply(res, 200, { ok: true, isUnlocked: true, entries, categories, prompt });
               return;
             } catch (err) {
               jsonReply(res, 401, {
@@ -959,7 +1044,8 @@ export async function apply(ctx, config = {}) {
                 await service.setCodeWords(Array.isArray(codeWordsInput) ? codeWordsInput : [String(codeWordsInput)]);
               }
               const entries = await service.listEntries();
-              jsonReply(res, 200, { ok: true, isUnlocked: true, entries, codeWords: service.getCodeWords() });
+              const categories = service.listCategories();
+              jsonReply(res, 200, { ok: true, isUnlocked: true, entries, categories, codeWords: service.getCodeWords() });
               return;
             } catch (err) {
               jsonReply(res, 500, { error: err?.message || 'Setup failed' });
@@ -1152,7 +1238,16 @@ export async function apply(ctx, config = {}) {
             }
           }
 
-          // —— POST /memorypets-api/upsert   {id?,kind,label,value,hint?}
+          // —— POST /memorypets-api/upsert   {id?,kind,label,value?,hint?}
+          //
+          // `value` may be omitted entirely:
+          //   - editing an existing entry (id given, or label+kind matches
+          //     one already in the vault) -> keeps the current value as-is.
+          //     This is what lets the web UI's "quick add: title only, fill
+          //     content in later" flow and in-place editing of a hidden
+          //     credential (whose real value is never sent to the client)
+          //     work without ever resubmitting/overwriting the secret.
+          //   - creating a brand-new entry -> defaults to '' (empty content).
           if (method === 'POST' && endpoint === 'upsert') {
             const body = await readJsonBody(req, res);
             const kind = body?.kind;
@@ -1163,8 +1258,8 @@ export async function apply(ctx, config = {}) {
             if (typeof body?.label !== 'string' || !body.label.trim()) {
               jsonReply(res, 400, { error: 'label is required' }); return;
             }
-            if (typeof body?.value !== 'string' || !body.value) {
-              jsonReply(res, 400, { error: 'value is required' }); return;
+            if (body?.value !== undefined && typeof body.value !== 'string') {
+              jsonReply(res, 400, { error: 'value must be a string if provided' }); return;
             }
             if (body?.tags !== undefined && (!Array.isArray(body.tags) || !body.tags.every((t) => typeof t === 'string'))) {
               jsonReply(res, 400, { error: 'tags must be an array of strings' }); return;
@@ -1174,14 +1269,15 @@ export async function apply(ctx, config = {}) {
               id: body.id || undefined,
               kind,
               label: body.label,
-              value: body.value,
+              ...(body.value !== undefined ? { value: body.value } : {}),
               ...(body.hint ? { hint: body.hint } : {}),
               ...(cleanTags && cleanTags.length ? { tags: cleanTags } : {}),
               ...(body.dueDate ? { dueDate: body.dueDate } : {}),
             };
-            await service.upsert(entry);
+            const id = await service.upsert(entry);
             const entries = await service.listEntries();
-            jsonReply(res, 200, { ok: true, entries });
+            const categories = service.listCategories();
+            jsonReply(res, 200, { ok: true, id, entries, categories });
             return;
           }
 
@@ -1191,7 +1287,8 @@ export async function apply(ctx, config = {}) {
             if (!body?.id) { jsonReply(res, 400, { error: 'id required' }); return; }
             await service.remove(body.id);
             const entries = await service.listEntries();
-            jsonReply(res, 200, { ok: true, entries });
+            const categories = service.listCategories();
+            jsonReply(res, 200, { ok: true, entries, categories });
             return;
           }
 

@@ -105,6 +105,21 @@ function ShellOverlayComponent() {
   const [confirmPwd, setConfirmPwd] = React.useState('');
   const [error, setError] = React.useState(null);
   const [entries, setEntries] = React.useState([]);
+  // Category catalog for the notebook sidebar (工作/生活/学习/个人 + anything
+  // the user adds). Synced from the host (which stores it inside the
+  // encrypted vault snapshot, see packages/host/lib/vault.mjs), so it stays
+  // consistent with the Flutter client and the cloud relay.
+  const [categories, setCategories] = React.useState([]);
+  const [expanded, setExpanded] = React.useState(false); // 全屏笔记本视图
+  const [selectedCategory, setSelectedCategory] = React.useState(null); // null = 全部
+  const [notebookSearch, setNotebookSearch] = React.useState('');
+  const [newCategoryName, setNewCategoryName] = React.useState('');
+  // 左侧"添加条目"折叠区的三态：
+  //   collapsed — 只显示 "＋ 添加条目" 按钮 + 所有条目标题列表（默认）
+  //   quick     — 只有一个标题输入框，点"创建"后立即变成 edit 态方便手动填内容
+  //   edit      — 完整字段（类型/内容/标签/日期），editingId 非空时是"编辑已有条目"
+  const [sidebarFormMode, setSidebarFormMode] = React.useState('collapsed');
+  const [editingId, setEditingId] = React.useState(null);
   const [formKind, setFormKind] = React.useState('note');
   const [formLabel, setFormLabel] = React.useState('');
   const [formValue, setFormValue] = React.useState('');
@@ -153,7 +168,10 @@ function ShellOverlayComponent() {
       .catch(() => {});
     fetch('/memorypets-api/entries')
       .then((r) => r.json())
-      .then((data) => { if (Array.isArray(data.entries)) setEntries(data.entries); })
+      .then((data) => {
+        if (Array.isArray(data.entries)) setEntries(data.entries);
+        if (Array.isArray(data.categories)) setCategories(data.categories);
+      })
       .catch(() => {});
     fetch('/memorypets-api/settings')
       .then((r) => r.json())
@@ -186,6 +204,7 @@ function ShellOverlayComponent() {
         setSetupCodeWord('');
         if (Array.isArray(data.codeWords)) setCodeWords(data.codeWords);
         setEntries(data.entries || []);
+        setCategories(Array.isArray(data.categories) ? data.categories : []);
       })
       .catch((e) => setError(e.message));
   };
@@ -203,6 +222,7 @@ function ShellOverlayComponent() {
         setUnlocked(true);
         setPassword('');
         setEntries(data.entries || []);
+        setCategories(Array.isArray(data.categories) ? data.categories : []);
       })
       .catch((e) => setError(e.message));
   };
@@ -250,6 +270,9 @@ function ShellOverlayComponent() {
       .then(() => {
         setUnlocked(false);
         setEntries([]);
+        setExpanded(false);
+        setEditingId(null);
+        setSidebarFormMode('collapsed');
       })
       .catch(() => {});
   };
@@ -373,40 +396,145 @@ function ShellOverlayComponent() {
       .then((r) => r.json())
       .then((data) => {
         if (!data.ok) throw new Error(data.error || '同步失败');
-        if (data.action === 'pulled' && Array.isArray(data.entries)) setEntries(data.entries);
-        setCloudMessage(data.action === 'pulled' ? '已从云端拉取最新记忆（云端版本更新）。' : '已上传到云端。');
+        if (Array.isArray(data.entries)) setEntries(data.entries);
+        if (Array.isArray(data.categories)) setCategories(data.categories);
+        const messages = {
+          pushed: '已上传到云端。',
+          // "merged" replaces the old "pulled" (整体覆盖) behavior: on a
+          // version conflict we now merge entry-by-entry with the remote
+          // copy instead of discarding local changes — see cloudSyncNow()
+          // in packages/host/lib/index.mjs.
+          merged: data.uploaded === false
+            ? '本地与云端已合并，但重新上传暂时失败，请稍后再次点击"立即同步"。'
+            : '已与云端合并（双方新增/修改都保留，不会互相覆盖）。',
+        };
+        setCloudMessage(messages[data.action] || '同步完成。');
       })
       .catch((e) => setCloudMessage(e.message || '同步失败'))
       .finally(() => setCloudSyncing(false));
   };
 
+  const handleAddCategory = () => {
+    setError(null);
+    const name = newCategoryName.trim();
+    if (!name) return;
+    fetch('/memorypets-api/categories', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    })
+      .then((r) => r.json().then((d) => ({ status: r.status, data: d })))
+      .then(({ data }) => {
+        if (!data.ok) throw new Error(data.error || '添加类目失败');
+        setCategories(data.categories || []);
+        setNewCategoryName('');
+      })
+      .catch((e) => setError(e.message || '添加类目失败'));
+  };
+
+  const handleRemoveCategory = (name) => {
+    setError(null);
+    fetch('/memorypets-api/categories/remove', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    })
+      .then((r) => r.json().then((d) => ({ status: r.status, data: d })))
+      .then(({ data }) => {
+        if (!data.ok) throw new Error(data.error || '删除类目失败');
+        setCategories(data.categories || []);
+        if (selectedCategory === name) setSelectedCategory(null);
+      })
+      .catch((e) => setError(e.message || '删除类目失败'));
+  };
+
+  // Resets the shared add/edit form fields back to empty.
+  const resetForm = () => {
+    setFormLabel('');
+    setFormValue('');
+    setFormTags('');
+    setFormDueDate('');
+  };
+
+  // "＋ 添加条目": opens the collapsed sidebar section in "quick" mode —
+  // title only. Submitting it creates a bare note with empty content, then
+  // handleAdd() immediately switches into "edit" mode for that same entry
+  // so the user can type the content by hand (per request: 只有标题，点击
+  // 添加后手动输入内容).
+  const openQuickAdd = () => {
+    setError(null);
+    setEditingId(null);
+    setFormKind('note');
+    resetForm();
+    setSidebarFormMode('quick');
+  };
+
+  // Clicking an existing entry (sidebar title list or the main list) opens
+  // it for editing in the same shared form.
+  const openEditEntry = (entry) => {
+    setError(null);
+    setEditingId(entry.id);
+    setFormKind(entry.kind === 'profile' || entry.kind === 'work' ? 'note' : entry.kind);
+    setFormLabel(entry.label);
+    // Credential values are never sent to the client (server always
+    // projects them to '<HIDDEN>') — leaving this blank means "keep the
+    // current secret unchanged" (see opUpsert's value-omitted semantics).
+    setFormValue(entry.kind === 'credential' ? '' : (entry.value || ''));
+    setFormTags(Array.isArray(entry.tags) ? entry.tags.join(', ') : '');
+    setFormDueDate(entry.dueDate || '');
+    setSidebarFormMode('edit');
+  };
+
+  const cancelForm = () => {
+    setEditingId(null);
+    resetForm();
+    setSidebarFormMode('collapsed');
+  };
+
+  // Also used to fully reset the sidebar add/edit state when the notebook
+  // overlay closes or the vault locks, so a half-filled edit never lingers
+  // across sessions.
+  const closeNotebook = () => {
+    setExpanded(false);
+    cancelForm();
+  };
+
   const handleAdd = () => {
     setError(null);
-    if (!formLabel || !formValue) { setError('请填写标签和内容'); return; }
+    if (!formLabel.trim()) { setError('请填写标题'); return; }
     if (adding) return;
     setAdding(true);
     const tags = formTags.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean);
+    const isQuickCreate = sidebarFormMode === 'quick';
     fetch('/memorypets-api/upsert', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        kind: formKind,
+        ...(editingId ? { id: editingId } : {}),
+        kind: isQuickCreate ? 'note' : formKind,
         label: formLabel,
-        value: formValue,
+        // Quick-create only asks for a title — content stays unset (kept
+        // empty for a new entry, or left as-is for an edit) until the user
+        // fills it in manually in the edit form that follows.
+        ...(isQuickCreate ? {} : { value: formValue }),
         ...(tags.length ? { tags } : {}),
         ...(formDueDate ? { dueDate: formDueDate } : {}),
       }),
     })
       .then((r) => r.json().then((d) => ({ status: r.status, data: d })))
       .then(({ status, data }) => {
-        if (!data.ok) throw new Error(data.error || '添加失败');
+        if (!data.ok) throw new Error(data.error || '保存失败');
         if (Array.isArray(data.entries)) setEntries(data.entries);
-        setFormLabel('');
-        setFormValue('');
-        setFormTags('');
-        setFormDueDate('');
+        if (Array.isArray(data.categories)) setCategories(data.categories);
+        if (isQuickCreate && data.id) {
+          setEditingId(data.id);
+          setSidebarFormMode('edit');
+          setFormValue('');
+        } else {
+          cancelForm();
+        }
       })
-      .catch((e) => setError(e.message || '添加失败'))
+      .catch((e) => setError(e.message || '保存失败'))
       .finally(() => setAdding(false));
   };
 
@@ -421,6 +549,7 @@ function ShellOverlayComponent() {
       .then(({ status, data }) => {
         if (!data.ok) throw new Error(data.error || '删除失败');
         if (Array.isArray(data.entries)) setEntries(data.entries);
+        if (Array.isArray(data.categories)) setCategories(data.categories);
       })
       .catch((e) => setError(e.message || '删除失败'));
   };
@@ -532,7 +661,10 @@ function ShellOverlayComponent() {
     cursor: 'pointer',
   };
 
-  const entryRow = (e) =>
+  // `wrap: true` (used by the expanded full-screen notebook, which has room
+  // to spare) shows the full value instead of clipping it to one line —
+  // the narrow floating panel keeps the old single-line ellipsis behavior.
+  const entryRow = (e, { wrap = false } = {}) =>
     h(
       'div',
       {
@@ -550,11 +682,15 @@ function ShellOverlayComponent() {
     },
     h(
       'div',
-      { style: { minWidth: 0, flex: 1 } },
+      { style: { minWidth: 0, flex: 1, cursor: 'pointer' }, onClick: () => openEditEntry(e), title: '点击编辑' },
       h('div', { style: { fontSize: 12, color: '#6b7280' } }, `[${kindNames[e.kind] || e.kind}] ${e.label}`),
       h(
         'div',
-        { style: { fontSize: 13, color: '#111827', overflow: 'hidden', textOverflow: 'ellipsis' } },
+        {
+          style: wrap
+            ? { fontSize: 13, color: '#111827', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }
+            : { fontSize: 13, color: '#111827', overflow: 'hidden', textOverflow: 'ellipsis' },
+        },
         e.kind === 'credential' ? (e.hint ?? '••••••••') : e.value,
       ),
       (Array.isArray(e.tags) && e.tags.length) || e.dueDate
@@ -574,6 +710,111 @@ function ShellOverlayComponent() {
       '删除',
     ),
   );
+
+  // Entries visible in the expanded notebook: filtered by the selected
+  // category (matches entry.tags, case-insensitively) and by the free-text
+  // search box (matches label or value).
+  const notebookEntries = entries.filter((e) => {
+    if (selectedCategory) {
+      const tags = Array.isArray(e.tags) ? e.tags.map((t) => t.toLowerCase()) : [];
+      if (!tags.includes(selectedCategory.toLowerCase())) return false;
+    }
+    if (notebookSearch.trim()) {
+      const q = notebookSearch.trim().toLowerCase();
+      const hay = (e.label + ' ' + (e.kind === 'credential' ? '' : e.value)).toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+
+  // Shared "添加/编辑条目" form body — used by the narrow floating panel
+  // (always full fields) and the expanded full-screen notebook's sidebar
+  // (which can render it in three flavors):
+  //   quick=true              — only a title input (＋ 添加条目 flow)
+  //   quick=false, editingId  — full fields, editing an existing entry
+  //   quick=false, no id      — full fields, plain create (narrow panel)
+  const renderAddEntryForm = ({ quick = false } = {}) =>
+    h(
+      React.Fragment,
+      null,
+      !quick &&
+        h(
+          'select',
+          { style: inputStyle, value: formKind, onChange: (ev) => setFormKind(ev.target.value) },
+          h('option', { value: 'note' }, '笔记'),
+          h('option', { value: 'credential' }, '凭证'),
+        ),
+      h('input', {
+        style: inputStyle,
+        placeholder: quick ? '标题，例如：Knox Studio 发布记录' : '标题（例如：工作邮箱）',
+        value: formLabel,
+        onChange: (ev) => setFormLabel(ev.target.value),
+        autoFocus: quick,
+        onKeyDown: (ev) => { if (quick && ev.key === 'Enter') handleAdd(); },
+      }),
+      !quick &&
+        h('input', {
+          style: inputStyle,
+          placeholder: formKind === 'credential' && editingId ? '内容（留空 = 不修改原密文）' : '内容',
+          value: formValue,
+          onChange: (ev) => setFormValue(ev.target.value),
+          type: formKind === 'credential' ? 'password' : 'text',
+        }),
+      // Tags/categories: visible for every kind (previously note-only, which
+      // is why they were easy to miss) — clicking a category chip appends
+      // it to the tag list; typing a brand-new tag auto-registers it as a
+      // new category once saved (handled host-side in Vault#upsert).
+      !quick &&
+        h('div', { style: { display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 6 } },
+          categories.map((c) =>
+            h(
+              'button',
+              {
+                key: c,
+                type: 'button',
+                style: { ...chipIdle, padding: '2px 8px', fontSize: 11 },
+                onClick: () => {
+                  const list = formTags.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean);
+                  if (!list.some((t) => t.toLowerCase() === c.toLowerCase())) {
+                    setFormTags([...list, c].join(', '));
+                  }
+                },
+              },
+              c,
+            ),
+          ),
+        ),
+      !quick &&
+        h('input', {
+          style: inputStyle,
+          placeholder: '类目/标签，用逗号分隔（例如：工作, 计划）',
+          value: formTags,
+          onChange: (ev) => setFormTags(ev.target.value),
+        }),
+      !quick && formKind === 'note' &&
+        h('input', {
+          style: inputStyle,
+          type: 'date',
+          placeholder: '截止日期（可选）',
+          value: formDueDate,
+          onChange: (ev) => setFormDueDate(ev.target.value),
+        }),
+      h(
+        'div',
+        { style: { display: 'flex', gap: 6 } },
+        h(
+          'button',
+          {
+            style: { ...btnStyle, opacity: adding ? 0.6 : 1, cursor: adding ? 'wait' : 'pointer', flex: 1 },
+            onClick: handleAdd,
+            disabled: adding,
+          },
+          adding ? '保存中…' : quick ? '创建' : editingId ? '保存' : '添加',
+        ),
+        (quick || editingId) &&
+          h('button', { style: btnGhost, onClick: cancelForm, disabled: adding }, '取消'),
+      ),
+    );
 
 return h(
   'div',
@@ -604,6 +845,11 @@ return h(
               { style: { marginBottom: 10, display: 'flex', gap: 6, flexWrap: 'wrap' } },
               h(
                 'button',
+                { style: btnStyle, onClick: () => setExpanded(true) },
+                '📓 展开笔记本',
+              ),
+              h(
+                'button',
                 { style: btnGhost, onClick: handleLock },
                 '上锁',
               ),
@@ -617,60 +863,13 @@ return h(
               ),
             ),
             entries.length
-              ? h('div', null, entries.map(entryRow))
-              : h('div', { style: { color: '#6b7280', marginBottom: 10 } }, '还没有条目。'),
+              ? h('div', null, entries.map((e) => entryRow(e)))
+              : h('div', { style: { color: '#6b7280', marginBottom: 10 } }, '还没有条目。窄面板放不下整本笔记，点上面的"展开笔记本"按分类浏览全部内容。'),
             h(
               'div',
               { style: { borderTop: '1px solid rgba(0,0,0,0.08)', paddingTop: 10, marginTop: 6 } },
-              h('div', { style: { fontWeight: 600, marginBottom: 6, fontSize: 12 } }, '添加条目'),
-              h(
-                'select',
-                {
-                  style: inputStyle,
-                  value: formKind,
-                  onChange: (ev) => setFormKind(ev.target.value),
-                },
-                h('option', { value: 'note' }, '笔记'),
-                h('option', { value: 'credential' }, '凭证'),
-              ),
-              h('input', {
-                style: inputStyle,
-                placeholder: '标签（例如：工作邮箱）',
-                value: formLabel,
-                onChange: (ev) => setFormLabel(ev.target.value),
-              }),
-              h('input', {
-                style: inputStyle,
-                placeholder: '内容',
-                value: formValue,
-                onChange: (ev) => setFormValue(ev.target.value),
-                type: formKind === 'credential' ? 'password' : 'text',
-              }),
-              formKind === 'note' &&
-                h(React.Fragment, null,
-                  h('input', {
-                    style: inputStyle,
-                    placeholder: '标签，用逗号分隔（例如：工作, 计划）',
-                    value: formTags,
-                    onChange: (ev) => setFormTags(ev.target.value),
-                  }),
-                  h('input', {
-                    style: inputStyle,
-                    type: 'date',
-                    placeholder: '截止日期（可选）',
-                    value: formDueDate,
-                    onChange: (ev) => setFormDueDate(ev.target.value),
-                  }),
-                ),
-              h(
-                'button',
-                {
-                  style: { ...btnStyle, opacity: adding ? 0.6 : 1, cursor: adding ? 'wait' : 'pointer' },
-                  onClick: handleAdd,
-                  disabled: adding,
-                },
-                adding ? '添加中…' : '添加',
-              ),
+              h('div', { style: { fontWeight: 600, marginBottom: 6, fontSize: 12 } }, editingId ? '编辑条目' : '添加条目'),
+              renderAddEntryForm(),
             ),
             h(
               'div',
@@ -888,6 +1087,199 @@ return h(
       onClick: () => setShowPanel((v) => !v),
       title: '点击打开记忆宠物面板',
     }),
+    expanded && unlocked &&
+      h(
+        'div',
+        {
+          // Full-viewport backdrop. `position: fixed` here is relative to
+          // the viewport (not to wrapperStyle's small bottom-right box), so
+          // this covers the whole window regardless of where the pet sits.
+          style: {
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(15,23,42,0.45)',
+            zIndex: 10000,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            pointerEvents: 'auto',
+          },
+          onClick: closeNotebook,
+        },
+        h(
+          'div',
+          {
+            style: {
+              width: 'min(1000px, 92vw)',
+              height: '86vh',
+              background: '#fff',
+              borderRadius: 16,
+              boxShadow: '0 24px 64px rgba(0,0,0,0.35)',
+              display: 'flex',
+              overflow: 'hidden',
+              color: '#1f2937',
+              fontSize: 13,
+            },
+            onClick: (ev) => ev.stopPropagation(),
+          },
+          // ── 左侧类目栏 ──────────────────────────────────────────
+          h(
+            'div',
+            {
+              style: {
+                width: 280,
+                flexShrink: 0,
+                borderRight: '1px solid rgba(0,0,0,0.08)',
+                background: '#f9fafb',
+                padding: 14,
+                overflowY: 'auto',
+              },
+            },
+            h('div', { style: { fontWeight: 700, fontSize: 15, marginBottom: 12 } }, '📓 我的笔记本'),
+            h(
+              'div',
+              {
+                style: {
+                  padding: '6px 10px',
+                  borderRadius: 8,
+                  marginBottom: 4,
+                  cursor: 'pointer',
+                  fontWeight: selectedCategory === null ? 700 : 400,
+                  background: selectedCategory === null ? 'rgba(99,102,241,0.12)' : 'transparent',
+                  color: selectedCategory === null ? '#4338ca' : '#374151',
+                },
+                onClick: () => setSelectedCategory(null),
+              },
+              `全部（${entries.length}）`,
+            ),
+            categories.map((c) => {
+              const count = entries.filter((e) => Array.isArray(e.tags) && e.tags.some((t) => t.toLowerCase() === c.toLowerCase())).length;
+              const active = selectedCategory === c;
+              return h(
+                'div',
+                {
+                  key: c,
+                  style: {
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    padding: '6px 10px',
+                    borderRadius: 8,
+                    marginBottom: 4,
+                    cursor: 'pointer',
+                    fontWeight: active ? 700 : 400,
+                    background: active ? 'rgba(99,102,241,0.12)' : 'transparent',
+                    color: active ? '#4338ca' : '#374151',
+                  },
+                  onClick: () => setSelectedCategory(c),
+                },
+                h('span', null, `${c}（${count}）`),
+                h(
+                  'span',
+                  {
+                    title: '删除该类目（不会删除条目本身）',
+                    style: { color: '#9ca3af', fontSize: 11, cursor: 'pointer' },
+                    onClick: (ev) => { ev.stopPropagation(); handleRemoveCategory(c); },
+                  },
+                  '✕',
+                ),
+              );
+            }),
+            h(
+              'div',
+              { style: { marginTop: 10, borderTop: '1px solid rgba(0,0,0,0.08)', paddingTop: 10 } },
+              h('input', {
+                style: { ...inputStyle, marginBottom: 6 },
+                placeholder: '新类目，例如：旅行',
+                value: newCategoryName,
+                onChange: (ev) => setNewCategoryName(ev.target.value),
+                onKeyDown: (ev) => { if (ev.key === 'Enter') handleAddCategory(); },
+              }),
+              h('button', { style: { ...btnGhost, width: '100%' }, onClick: handleAddCategory }, '＋ 添加类目'),
+            ),
+            // 添加条目——放在"＋ 添加类目"下面。默认折叠成一个按钮，腾出的
+            // 空间用来列出所有条目标题（点标题直接进入编辑）；点按钮后先只填
+            // 标题，创建成功立刻转入编辑态，方便手动填内容。
+            h(
+              'div',
+              { style: { marginTop: 10, borderTop: '1px solid rgba(0,0,0,0.08)', paddingTop: 10 } },
+              sidebarFormMode === 'collapsed'
+                ? h(
+                    React.Fragment,
+                    null,
+                    h('button', { style: { ...btnStyle, width: '100%' }, onClick: openQuickAdd }, '＋ 添加条目'),
+                    h(
+                      'div',
+                      { style: { marginTop: 10, fontWeight: 600, fontSize: 12, color: '#6b7280' } },
+                      `所有条目（${entries.length}）`,
+                    ),
+                    entries.length
+                      ? entries.map((e) =>
+                          h(
+                            'div',
+                            {
+                              key: e.id,
+                              title: e.label,
+                              style: {
+                                padding: '5px 6px',
+                                borderRadius: 6,
+                                fontSize: 12,
+                                color: '#374151',
+                                cursor: 'pointer',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                              },
+                              onClick: () => openEditEntry(e),
+                            },
+                            `${e.kind === 'credential' ? '🔒' : '📝'} ${e.label}`,
+                          ),
+                        )
+                      : h('div', { style: { fontSize: 12, color: '#9ca3af', marginTop: 4 } }, '还没有条目'),
+                  )
+                : h(
+                    React.Fragment,
+                    null,
+                    h('div', { style: { fontWeight: 600, marginBottom: 8, fontSize: 12 } }, editingId ? '编辑条目' : '添加条目'),
+                    renderAddEntryForm({ quick: sidebarFormMode === 'quick' }),
+                  ),
+            ),
+          ),
+          // ── 右侧内容区 ──────────────────────────────────────────
+          h(
+            'div',
+            { style: { flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 } },
+            h(
+              'div',
+              {
+                style: {
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '12px 16px',
+                  borderBottom: '1px solid rgba(0,0,0,0.08)',
+                },
+              },
+              h('input', {
+                style: { ...inputStyle, marginBottom: 0, maxWidth: 320 },
+                placeholder: '搜索标题或内容…',
+                value: notebookSearch,
+                onChange: (ev) => setNotebookSearch(ev.target.value),
+              }),
+              h('button', { style: btnGhost, onClick: closeNotebook }, '✕ 关闭'),
+            ),
+            h(
+              'div',
+              { style: { flex: 1, overflowY: 'auto', padding: 16 } },
+              notebookEntries.length
+                ? notebookEntries.map((e) => entryRow(e, { wrap: true }))
+                : h('div', { style: { color: '#6b7280' } }, selectedCategory || notebookSearch
+                    ? '没有符合条件的条目。'
+                    : '还没有条目，点左侧"＋ 添加条目"按钮新建第一条笔记吧。'),
+            ),
+          ),
+        ),
+      ),
   );
 }
 

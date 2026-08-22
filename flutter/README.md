@@ -1,7 +1,8 @@
 # MemoryPets — Flutter Client
 
 Flutter rewrite of the MemoryPets mobile client (the previous Kotlin/Compose
-attempt lives in `../android`, kept for reference but no longer maintained).
+attempt has been removed; see `../docs/Android_Client_Spec.md` for the
+historical spec).
 
 Implements the same contract as `../docs/MOBILE_SYNC_API.md`: on-device
 AES-256-GCM + PBKDF2-HMAC-SHA256 vault encryption, byte-for-byte compatible

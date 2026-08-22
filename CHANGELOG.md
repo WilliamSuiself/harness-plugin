@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`memorypets_upsert`'s `kind` enum could silently swallow a save.** The
+  tool's JSON schema only allowed `['note', 'credential']`, narrower than
+  what `operations.mjs`'s `VALID_KINDS` actually accepts. A model that
+  emitted a legacy value like `kind: 'work'` (still a very natural thing to
+  say) got the call rejected by schema validation *before* `opUpsert()` ever
+  ran — the entry was never persisted, even though the model could still go
+  on to tell the user it succeeded. Widened the enum to
+  `['note', 'credential', 'profile', 'work']` to match.
+- **Cloud-sync conflict resolution no longer discards unsynced local edits.**
+  `cloudSyncNow()` (packages/host/lib/index.mjs) and the Flutter
+  `SyncOrchestrator` used to adopt the *entire* remote snapshot on a version
+  conflict (`vault = remoteVault` / `blobStore.overwriteWithRemote(decrypted,
+  ...)`), silently erasing any local entry/category that hadn't been pushed
+  yet — the root cause of "web 端更新后内容被手机端整体覆盖". Both now merge
+  entry-by-entry (`Vault#mergeSnapshot` / `Vault.mergeWith`, keyed by id +
+  `updatedAt`) and push the merged result back, instead of overwriting.
+  Deletes are now tracked with tombstones (`{ id, deletedAt }`) so a stale
+  copy synced from another device can't resurrect an entry you just deleted.
+
+### Added
+
+- **Notebook categories.** The vault snapshot now carries a `categories`
+  catalog (seeded with 工作/生活/学习/个人 on first creation) alongside
+  `entries`. It rides along on the existing seal/unlock/cloud-sync path — no
+  separate file — so it's automatically end-to-end encrypted and synced
+  across the DSH web plugin and the Flutter app. `Vault#upsert` auto-registers
+  any new tag as a category. New host endpoints: `GET /memorypets-api/categories`,
+  `POST /memorypets-api/categories` (add), `POST /memorypets-api/categories/remove`.
+- **Web: expandable full-screen notebook view.** The floating panel was too
+  narrow to browse a whole notebook. A new "📓 展开笔记本" button opens a
+  full-screen overlay with a left category sidebar (全部 + catalog chips +
+  add-new-category input) and a right entry list/search area. The sidebar's
+  add-entry section is collapsed into a "＋ 添加条目" button by default,
+  freeing that space for a scrollable list of every entry's title (click a
+  title to edit it); clicking "＋ 添加条目" asks for a title only — saving it
+  immediately reopens the entry in full edit mode so the content can be
+  typed in by hand. Tags are now visible for every entry kind (previously
+  note-only, which made them easy to miss) and quick-select chips for
+  existing categories are shown
+  above the tag input.
+- **In-place editing from the web notebook.** Clicking any entry (in the
+  sidebar title list or the main list) now opens it in the same add/edit
+  form instead of only supporting add/delete. `POST /memorypets-api/upsert`'s
+  `value` field is now optional: omitting it on an edit keeps the current
+  value unchanged (needed both for the title-only quick-add flow above and
+  for editing a credential's label/tags without ever having to resubmit — or
+  risk blanking out — its real secret, which the client never receives in
+  the first place). `service.upsert()` now returns the resolved entry id.
+- **Flutter: category filter chips on Home** and quick-select category chips
+  in the entry editor, mirroring the web notebook. `VaultSession` gained
+  `categories` / `addCategory()` / `removeCategory()`.
+
 ### Security
 
 - **Reveal-credential leakage hardened.** `service.revealCredential` now:

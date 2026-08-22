@@ -142,9 +142,37 @@ class _EditorScreenState extends State<EditorScreen> {
               ),
             ],
             const SizedBox(height: 12),
+            // 快速选类目：点一下就追加到标签输入框，和 DSH Web 面板的行为一致——
+            // 标签本身就是分类，选完了还能继续手打新标签。
+            Builder(builder: (context) {
+              final categories = context.watch<VaultSession>().categories;
+              if (categories.isEmpty) return const SizedBox.shrink();
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Wrap(
+                  spacing: 6,
+                  children: categories.map((c) {
+                    return ActionChip(
+                      label: Text(c),
+                      onPressed: () {
+                        final current = _tagsCtrl.text
+                            .split(RegExp('[,，]'))
+                            .map((e) => e.trim())
+                            .where((e) => e.isNotEmpty)
+                            .toList();
+                        if (!current.any((t) => t.toLowerCase() == c.toLowerCase())) {
+                          current.add(c);
+                          setState(() => _tagsCtrl.text = current.join(', '));
+                        }
+                      },
+                    );
+                  }).toList(),
+                ),
+              );
+            }),
             TextField(
               controller: _tagsCtrl,
-              decoration: const InputDecoration(labelText: '标签（逗号分隔，如：工作, 家庭）'),
+              decoration: const InputDecoration(labelText: '类目/标签（逗号分隔，如：工作, 家庭）'),
             ),
             const SizedBox(height: 12),
             TextField(

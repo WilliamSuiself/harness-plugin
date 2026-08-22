@@ -330,10 +330,21 @@ export function apply(ctx) {
           },
           kind: {
             type: 'string',
-            enum: ['note', 'credential'],
+            // IMPORTANT: this MUST stay a superset of operations.mjs's
+            // VALID_KINDS. A narrower enum here (it used to be just
+            // ['note','credential']) means a model that emits a legacy
+            // value like 'work' gets its call rejected by the sandbox's
+            // JSON-schema validation BEFORE opUpsert() ever runs — the
+            // entry silently never gets saved, even though the model may
+            // go on to tell the user it succeeded. 'profile'/'work' are
+            // listed as legacy-compatible so an occasional stray value
+            // never causes a silent no-op; NEW saves should still use
+            // 'note' or 'credential' per the description above.
+            enum: ['note', 'credential', 'profile', 'work'],
             description:
-              'Entry category. note = anything non-secret (personal / work / plans / family / to-dos), ' +
-              'credential = secret.',
+              'Entry category. note = anything non-secret (personal / work / plans / family / to-dos; ' +
+              'use tags[] like ["工作"] to categorize it, NOT this field), credential = secret. ' +
+              '(profile/work are accepted only for editing pre-existing legacy entries — do not use them for new saves.)',
           },
           label: {
             type: 'string',

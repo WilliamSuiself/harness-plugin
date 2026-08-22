@@ -1,47 +1,82 @@
-node_modules
-dist
-*.log
+# ── Flutter / Dart ─────────────────────────────────────────────────────────
+flutter/.dart_tool/
+flutter/.flutter-plugins
+flutter/.flutter-plugins-dependencies
+flutter/.packages
+flutter/build/
+flutter/.pub-cache/
+flutter/.pub/
+flutter/.metadata
+flutter/pubspec.lock
+
+# iOS / macOS build & native
+flutter/ios/Pods/
+flutter/ios/.symlinks/
+flutter/ios/Flutter/Flutter.framework
+flutter/ios/Flutter/Flutter.podspec
+flutter/macos/Pods/
+flutter/macos/Flutter/Flutter.framework
+
+# ── Android build artifacts (root + flutter/android) ──────────────────────
+android/.gradle/
+android/build/
+android/app/build/
+android/*/build/
+android/local.properties
+android/captures/
+android/.idea/
+android/*.iml
+android/.cxx/
+android/app/release/
+android/app/debug/
+
+flutter/android/.gradle/
+flutter/android/build/
+flutter/android/app/build/
+flutter/android/.cxx/
+flutter/android/local.properties
+flutter/android/key.properties
+flutter/android/.idea/
+
+# ── Node / dsh plugin builds ──────────────────────────────────────────────
+node_modules/
+packages/*/node_modules/
+packages/client/lib/client.bundle.js
+
+# ── OS junk ───────────────────────────────────────────────────────────────
 .DS_Store
-
-# === DSH runtime / user data (NEVER commit) ===
-.dsh-home/
-.dsh-home_backup*/
-
-# === MemoryPets vault files (encrypted, but never commit envelope/codewords) ===
-*.envelope.json
-*.codewords.json
-
-# === Temporary probe / test scripts (created during debugging) ===
-_*.py
-_*.mjs
-_*.log
-_*.sh
-_direct_apply_test.py
-
-# === Editor / OS ===
-.idea/
-.vscode/
 Thumbs.db
+*.swp
+*.swo
+*~
+
+# ── IDE ───────────────────────────────────────────────────────────────────
+.idea/
 *.iml
-*.ipr
-*.iws
+.vscode/
+.fleet/
+.cursor/
 
-# === Android (Kotlin + Flutter android/ shells) ===
-**/.gradle/
-**/.kotlin/
-**/build/
-**/captures/
-**/.cxx/
-**/.externalNativeBuild/
-**/local.properties
-gradle-app.setting
-*.apk
-*.aab
+# Trae IDE internal workflow state (not part of project source)
+.spec-workflow/
 
-# === Flutter / Dart ===
-**/.dart_tool/
-**/.pub-cache/
-**/.pub/
-**/.flutter-plugins
-**/.flutter-plugins-dependencies
-**/ios/Flutter/.last_build_id
+# ── Logs / temp / secrets ────────────────────────────────────────────────
+*.log
+*.tmp
+*.bak
+*.orig
+core
+.env
+.env.*
+secrets.json
+**/secrets.json
+
+# ── Local dev artifacts referenced in scripts but not source ──────────────
+/tmp/mp-data/
+/tmp/mp-server-check.sh
+/tmp/mp-fix.sh
+/tmp/dsh-web.log
+
+# ── Local Android experiment leftovers (kept out of VCS) ─────────────────
+flutter/build/
+flutter/.dart_tool/

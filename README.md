@@ -2,13 +2,13 @@
 
 MemoryPets 是一个运行在 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 平台之上的**多端、多智能体共享笔记本系统**，同时在浏览器右下角提供一只可交互的浮动宠物伴侣。
 
-你可以像跟宠物说话一样，用**自然语言**或**自定义暗语**快速记下任何灵感、待办、资料；所有接入同一账号的智能体（AI Agent）与设备（浏览器 / 安卓手机 / 未来 iOS）都能实时同步同一份笔记本内容，乐观并发控制保证多端同时编辑也不会丢失数据。
+你可以像跟宠物说话一样，用**自然语言**或**自定义暗语**快速记下任何灵感、待办、资料；所有接入同一账号的智能体（AI Agent）与设备（浏览器插件 / Flutter 移动客户端，覆盖 Android 与 iOS）都能实时同步同一份笔记本内容，乐观并发控制保证多端同时编辑也不会丢失数据。
 
 ---
 
 ## 核心能力
 
-- **🌐 云端多端同步**：部署一个 Relay 服务器（自带一键脚本 + Cloudflare/Caddy HTTPS），DSH 浏览器插件与安卓 App（及未来 iOS）之间**实时双向同步**；采用乐观并发（expectedVersion + 409 conflict），多端同时编辑不丢。
+- **🌐 云端多端同步**：部署一个 Relay 服务器（自带一键脚本 + Cloudflare/Caddy HTTPS），DSH 浏览器插件与 Flutter 移动客户端（Android / iOS）之间**实时双向同步**；采用乐观并发（expectedVersion + 409 conflict），多端同时编辑不丢。
 - **🤝 多智能体共享知识**：所有挂在同一 Harness 实例上的 AI Agent 都能通过 6 个标准工具读写同一本共享笔记本——AI 查资料、贴上下文、写待办全部走同一套 API。
 - **🐾 浮动宠物 UI**：720×720 PNG 帧动画，支持 `站立 / 思考 / 等待 / 睡觉` 四种心情；点宠物直接打开笔记本面板，或切换动画心情。
 - **⚡ 暗语直达（Codeword Gate）**：消息中出现用户自定义暗语时，**绕过 LLM 决策**，本地规则解析意图并立即执行（例如 "记一下 明天下午3点开会 标签 工作" → 一秒写入）。
@@ -17,7 +17,7 @@ MemoryPets 是一个运行在 [DeepSeek Harness](https://github.com/deepseek-ai/
   - **资料（profile / work）**：与 AI 协作时常用的上下文资料，会注入到系统提示里让 Agent 随时可用
   - **凭证（credential）**：默认不注入上下文、不显示真实值，需显式解锁 + 调用 reveal 工具才会返回
 - **🔐 端到端加密（底层实现）**：所有笔记在离开设备前就用 AES-GCM-256 + PBKDF2 25 万次迭代打包成加密信封；Relay 是**零知识的纯 blob 存储**——永远看不到主密码、永远看不到明文。
-- **📱 Android 客户端**：完整规格文档已就绪（Kotlin + Jetpack Compose + Biometric + WorkManager 周期同步），见 [`docs/Android_Client_Spec.md`](docs/Android_Client_Spec.md)。
+- **📱 Flutter 移动客户端**：`flutter/` 目录下已实现可运行的 Android/iOS/macOS/Web 等多平台客户端（Setup / Unlock / Home / Editor / Settings 五屏 + 云同步全流程），与 DSH 插件字节级兼容同一套加密协议。原 Kotlin/Jetpack Compose 方案（`android/` 目录）已**移除**。
 
 ---
 
@@ -45,19 +45,33 @@ harness-plugin/
 │   │       ├── index.mjs         # host 侧桩（给 dsh-client-modules 扫描用）
 │   │       ├── client.mjs        # UI 源码：宠物面板 + 笔记 CRUD + 云同步配置
 │   │       └── client.bundle.js  # ⚠️ 自动生成，不要手改（pnpm build:client 重生）
-│   └── cloud-sync/               # 🚀 Relay 服务器：零知识 blob 存储
+│   └── cloud-sync/               # 🚀 Relay 服务器：零知识 blob 存储（已实现并可部署）
 │       ├── bin/start.mjs         # systemd 启动入口
+│       ├── README.md             # Relay 使用说明 + 协议细节
+│       ├── test/                 # node:test 单元测试
 │       └── lib/
 │           ├── server.mjs        # createServer：/accounts/register|login + GET|PUT /vault
 │           ├── auth.mjs          # 云账号 scrypt 散列 + session token 管理
 │           └── store.mjs         # 磁盘持久化 vaults/<username>.json + CONFLICT 抛出点
+├── flutter/                       # 📱 移动客户端（当前维护版本，Flutter，可编译运行）
+│   └── lib/
+│       ├── models/               # Entry / Vault / Envelope(KdfConfig) / SyncOutcome
+│       ├── crypto/                # VaultCrypto：PBKDF2 + AES-GCM（cryptography 包，字节级对齐 host 端）
+│       ├── storage/               # AppPrefs（SharedPreferences）+ VaultBlobStore（本地信封）
+│       ├── api/                   # CloudSyncApi REST 客户端 + DTO
+│       ├── sync/                  # SyncOrchestrator：push / pull / 409 conflict 重试
+│       ├── session/               # VaultSession：内存态已解密 Vault + 当前会话 CRUD
+│       ├── screens/               # setup / unlock / home / editor / settings + 根导航
+│       ├── theme/                 # Material 3 明暗主题
+│       └── main.dart              # Provider 装配 + 入口
 ├── docs/
-│   ├── MOBILE_SYNC_API.md        # 移动端对接协议：加密参数 + REST API（安卓/iOS 必读）
-│   └── Android_Client_Spec.md    # 安卓端完整规格：架构 / UI / 加密 / 安全 / 里程碑 26 工作日
+│   ├── MOBILE_SYNC_API.md        # 移动端对接协议：加密参数 + REST API（Flutter/iOS 必读）
+│   └── Android_Client_Spec.md    # 早期安卓端规格文档（历史参考，已被 flutter/ 实现取代）
 ├── assets/                       # 宠物 PNG 帧序列（standing / thinking / waiting / sleeping）
 ├── scripts/
 │   ├── build-client.mjs          # client.mjs → client.bundle.js（支持 --check 校验 CI）
 │   ├── reset-vault.mjs           # 清空本地笔记本 & 暗语（回到首次 Setup）
+│   ├── restart-dsh.sh            # 重启 dsh web（改完 host/client 代码后用）
 │   └── deploy-cloud-sync.sh      # 🚀 一键部署 Relay：Caddy + Cloudflare HTTPS + systemd
 ├── cordis.patch.yml              # DSH profile 安装模板（替换 <INSTALL_DIR> 即可）
 ├── CHANGELOG.md
@@ -268,15 +282,28 @@ bash <(curl -sL https://raw.githubusercontent.com/WilliamSuiself/harness-plugin/
 
 ---
 
-## 📱 Android 客户端
+## 📱 移动客户端（Flutter）
 
-完整规格文档已准备好：[`docs/Android_Client_Spec.md`](docs/Android_Client_Spec.md)（约 26 工作日单人 MVP），包含：
+`flutter/` 目录下是当前维护的移动客户端，基于 Flutter，可直接编译运行到 Android / iOS，与 DSH 插件遵循同一份 [`docs/MOBILE_SYNC_API.md`](docs/MOBILE_SYNC_API.md) 协议。
 
-- 与 DSH 插件 **字节级一致** 的加密协议（PBKDF2 250k 迭代 + AES-256-GCM，含 KAT 向量测试代码）
-- 云同步 push→409→pull→retry 全流程（Retrofit + OkHttp + WorkManager 周期同步）
-- Jetpack Compose 5 屏导航（Setup / Unlock / Home / Editor / Settings）+ 宠物桌面 Widget
-- 暗语直达 + 系统分享接入（Chrome 里"分享 → MemoryPets"直接记笔记）
-- 安全红线清单（FLAG_SECURE、60s 自动上锁、`adb run-as` 明文落地检测）
+已实现：
+
+- 与 DSH 插件 **字节级一致** 的加密协议（PBKDF2-HMAC-SHA256 250k 迭代 + AES-256-GCM，`cryptography` 包实现）
+- Setup / Unlock / Home / Editor / Settings 五屏完整导航（Provider 状态管理）
+- 云同步全流程：GET → 若远端更新则解密采用 → 带 `expectedVersion` 的 PUT → 409 冲突自动重试一次
+- 笔记 / 凭证条目的真实增删改查（内存态 `Vault`，每次改动重新封装成信封持久化）
+- 设置页：切换 Relay 服务器地址、云账号登出、暗语列表管理、深色模式
+
+暂未实现（后续规划）：指纹解锁、FLAG_SECURE 等价的安全窗口、修改主密码、桌面 Widget、后台周期同步、Markdown 导出、Session Token 安全存储升级。详见 [`flutter/README.md`](flutter/README.md)。
+
+```bash
+cd flutter
+flutter pub get
+flutter run                 # 需要已连接的设备或模拟器
+flutter build apk --debug   # 或 --release
+```
+
+> ℹ️ 原 Kotlin + Jetpack Compose 原型（`android/` 目录）已**移除**，其历史规格文档 [`docs/Android_Client_Spec.md`](docs/Android_Client_Spec.md) 仍保留作为加密实现的交叉参考。新功能与修复请一律在 `flutter/` 下进行。
 
 ---
 
